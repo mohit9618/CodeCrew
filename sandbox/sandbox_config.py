@@ -1,0 +1,8 @@
+
+SANDBOX_IMAGE = "codecrew-sandbox"
+
+CPU_LIMIT = 1.0
+MEMORY_LIMIT = "512m"
+TIMEOUT_SECONDS = 120
+
+
