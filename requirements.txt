@@ -1,0 +1,11 @@
+
+langgraph
+langchain
+langchain-groq
+fastmcp
+python-dotenv
+pydantic
+pytest
+mcp
+langgraph-checkpoint-postgres
+psycopg[binary,pool]

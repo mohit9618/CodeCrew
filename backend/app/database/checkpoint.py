@@ -1,12 +1,12 @@
 
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
-from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg_pool import AsyncConnectionPool
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from backend.app.config import DATABASE_URL
 
 
-pool = ConnectionPool(
+pool = AsyncConnectionPool(
     conninfo=DATABASE_URL,
     min_size=1,
     max_size=10,
@@ -18,4 +18,6 @@ pool = ConnectionPool(
     open=False
 )
 
-checkpointer = PostgresSaver(pool)
+
+def get_checkpointer():
+    return AsyncPostgresSaver(pool)

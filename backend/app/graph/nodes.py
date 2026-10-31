@@ -1,10 +1,62 @@
 
 import asyncio
 
+from backend.app.agents.intake import IntakeAgent
+from backend.app.agents.project_manager import ProjectManagerAgent
+from backend.app.agents.architect import ArchitectAgent
 from backend.app.agents.developer import DeveloperAgent
 from backend.app.agents.tester import TesterAgent
+
 from backend.app.mcp.clients.filesystem import FilesystemClient
 from sandbox.execution import run_tests
+
+
+async def intake_node(state: dict) -> dict:
+    intake = IntakeAgent()
+
+    output = await intake.analyze_request(
+        request=state["request"],
+        repo_url=state["repo_url"],
+        repo_tree=state["repo_tree"],
+        file_contents=state["file_contents"]
+    )
+
+    return {
+        "intake_result": output.model_dump(),
+        "status": "intake_completed"
+    }
+
+
+async def project_manager_node(state: dict) -> dict:
+    project_manager = ProjectManagerAgent()
+
+    output = await project_manager.create_specification(
+        state["intake_result"]
+    )
+
+    return {
+        "project_spec": output.model_dump(),
+        "status": "specification_completed"
+    }
+
+
+async def architect_node(state: dict) -> dict:
+    architect = ArchitectAgent()
+
+    output = await architect.design_architecture(
+        project_spec=state["project_spec"],
+        repo_tree=state["repo_tree"],
+        file_contents=state["file_contents"]
+    )
+
+    architecture = output.model_dump()
+
+    return {
+        "architecture": architecture,
+        "tasks": architecture["tasks"],
+        "execution_batches": architecture["execution_batches"],
+        "status": "architecture_completed"
+    }
 
 
 async def developer_node(state: dict) -> dict:
