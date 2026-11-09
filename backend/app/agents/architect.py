@@ -43,8 +43,8 @@ class DevelopmentTask(BaseModel):
 
 
 class ArchitectureOutput(BaseModel):
-    architecture_summary: str
-    existing_architecture: str
+    architecture_summary: str= ""
+    existing_architecture: str = ""
 
     proposed_changes: list[str] = Field(default_factory=list)
     technology_stack: list[str] = Field(default_factory=list)
@@ -65,14 +65,15 @@ class ArchitectureOutput(BaseModel):
 
 class ArchitectAgent:
     def __init__(self):
-        self.llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            temperature=0
-        )
+      self.llm = ChatGroq(
+          model="openai/gpt-oss-120b",
+          temperature=0
+      )
 
-        self.structured_llm = self.llm.with_structured_output(
-            ArchitectureOutput
-        )
+      self.structured_llm = self.llm.with_structured_output(
+          ArchitectureOutput,
+          method="json_mode"
+      )
 
     async def design_architecture(
         self,
@@ -176,6 +177,36 @@ class ArchitectAgent:
         - If repository information is insufficient, state
           uncertainty instead of inventing file paths.
 
+
+          TASK JSON STRUCTURE:
+
+Every object inside the tasks array MUST contain all these fields:
+
+{{
+    "task_id": "T1",
+    "title": "Implement cube function",
+    "description": "Add cube(a) to calculator.py",
+    "domain": "backend",
+    "assigned_developer": "backend_developer",
+    "files_to_modify": ["calculator.py"],
+    "files_to_read": [],
+    "dependencies": [],
+    "acceptance_criteria": [
+        "cube(a) returns a ** 3"
+    ]
+}}
+
+STRICT RULES:
+
+- Use task_id, never id.
+- Every task must include title and domain.
+- domain must be one of the allowed DevelopmentTask domain values.
+- assigned_developer must be one of the three allowed developer identifiers.
+- Always include files_to_modify, files_to_read, dependencies and acceptance_criteria.
+- Use empty arrays when a field has no values.
+- Do not omit any task fields.
+
+
         EXECUTION BATCHES:
 
         - Group independent tasks into the same batch.
@@ -193,19 +224,17 @@ class ArchitectAgent:
 
         OUTPUT FORMAT:
 
-        - proposed_changes must be a list of strings.
-        - execution_batches must be a nested list of task IDs.
-        - Each inner list contains tasks that can execute in parallel.
-        - Tasks in later batches execute after earlier batches.
-        - Every task ID must appear exactly once.
-        - Respect task dependencies when creating execution batches.
+Return the response as valid JSON matching the ArchitectureOutput schema.
 
-        Example:
-        execution_batches = [
-            ["T1", "T2"],
-            ["T3"],
-            ["T4", "T5"]
-        ]
+- Output must be a single JSON object.
+- Do not use Markdown code fences.
+- Do not include explanations outside the JSON object.
+- proposed_changes must be a list of strings.
+- execution_batches must be a nested list of task IDs.
+- Each inner list contains tasks that can execute in parallel.
+- Tasks in later batches execute after earlier batches.
+- Every task ID must appear exactly once.
+- Respect task dependencies when creating execution batches.
 
         REQUIREMENT PRESERVATION:
 
@@ -250,6 +279,19 @@ class ArchitectAgent:
 
         Do not write code or modify files.
         Return structured output.
+
+        IMPORTANT TASK GENERATION RULES:
+
+    IMPORTANT TASK GENERATION RULES:
+
+- Evaluate every explicit user requirement separately.
+- Existing implementation does not automatically mean the requested task is incomplete.
+- Verify existing code and tests against the exact acceptance criteria.
+- If all requirements are fully satisfied, return no implementation tasks.
+- Do not invent unrelated or unnecessary tasks.
+- Mention evidence for already-satisfied requirements in architecture_summary.
+- If repository context is insufficient, clearly state the uncertainty.
+- Never claim that a feature or its tests exist unless the provided context confirms it.
         """
 
         return await self.structured_llm.ainvoke(prompt)

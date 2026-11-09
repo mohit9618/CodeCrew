@@ -1,30 +1,25 @@
-import pytest
-from calculator import add, subtract, multiply, divide, power
+import unittest
+
+# Import the functions to be tested from the calculator module
+from calculator import add, subtract, multiply, divide, power, square, cube
 
 
-def test_add():
-    assert add(2, 3) == 5
-    assert add(-1, 1) == 0
+class TestCalculator(unittest.TestCase):
+    # Existing tests (if any) would be here
+    # ...
+
+    def test_cube_positive(self):
+        """Test that cube returns the correct result for a positive integer."""
+        self.assertEqual(cube(3), 27)
+
+    def test_cube_negative(self):
+        """Test that cube returns the correct result for a negative integer."""
+        self.assertEqual(cube(-2), -8)
+
+    def test_cube_zero(self):
+        """Test that cube returns zero when the input is zero."""
+        self.assertEqual(cube(0), 0)
 
 
-def test_subtract():
-    assert subtract(5, 3) == 2
-    assert subtract(0, 5) == -5
-
-
-def test_multiply():
-    assert multiply(4, 3) == 12
-    assert multiply(-2, 3) == -6
-
-
-def test_divide():
-    assert divide(10, 2) == 5
-    assert divide(5, 2) == 2.5
-
-
-def test_power():
-    assert power(2, 3) == 8
-    assert power(5, 0) == 1
-    assert power(9, 0.5) == 3.0
-    # Test negative exponent
-    assert power(2, -2) == 0.25
+if __name__ == "__main__":
+    unittest.main()

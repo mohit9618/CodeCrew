@@ -22,11 +22,14 @@ class CodeCrewState(TypedDict, total=False):
     implementation_summary: str
     applied_files: list[str]
 
-    # Developer subgraph control
-    current_batch_index: int
-    developer_errors: Annotated[list[dict], operator.add]
+    # Developer pipeline control
+    developer_stage: str
+    working_repo_tree: str
+    working_file_contents: str
+    stage_summary: Annotated[list[str], operator.add]
 
     # Parallel developer agents can append their patches
+    developer_errors: Annotated[list[dict], operator.add]
     patches: Annotated[list[dict], operator.add]
 
     # Testing information

@@ -6,9 +6,9 @@ from backend.app.graph.nodes import (
     intake_node,
     project_manager_node,
     architect_node,
-    developer_node,
     tester_node
 )
+from backend.app.graph.developer_subgraph import developer_subgraph
 
 from backend.app.graph.routing import (
     route_after_development,
@@ -21,7 +21,7 @@ graph = StateGraph(CodeCrewState)
 graph.add_node("intake", intake_node)
 graph.add_node("project_manager", project_manager_node)
 graph.add_node("architect", architect_node)
-graph.add_node("developer", developer_node)
+graph.add_node("developer", developer_subgraph)
 graph.add_node("tester", tester_node)
 
 
