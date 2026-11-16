@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
+from backend.app.llm import get_groq_llm
 
 load_dotenv()
 
@@ -65,10 +66,7 @@ class ArchitectureOutput(BaseModel):
 
 class ArchitectAgent:
     def __init__(self):
-        self.llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            temperature=0
-        )
+        self.llm = get_groq_llm()
 
     async def design_architecture(
         self,
@@ -79,6 +77,20 @@ class ArchitectAgent:
         revision_feedback: str = ""
     ) -> ArchitectureOutput:
 
+        project_context = json.dumps(
+            project_spec,
+            ensure_ascii=False
+        )[:3500]
+
+        analysis_context = json.dumps(
+            repository_analysis,
+            ensure_ascii=False
+        )[:1200]
+
+        repo_tree = repo_tree[:1000]
+        file_contents = file_contents[:2000]
+        revision_feedback = revision_feedback[:1000]
+
         prompt = f"""
 You are the Architect Agent of CodeCrew,
 a general-purpose AI software engineering team.
@@ -88,10 +100,10 @@ design the required implementation architecture, and decompose
 the requested work into developer tasks.
 
 PROJECT SPECIFICATION:
-{project_spec}
+{project_context}
 
 REPOSITORY ANALYSIS:
-{repository_analysis}
+{analysis_context}
 
 REPOSITORY DIRECTORY TREE:
 {repo_tree}
@@ -115,7 +127,7 @@ YOUR RESPONSIBILITIES:
 9. Identify tasks that can execute in parallel.
 10. Define integration considerations.
 11. Identify actual architectural risks.
-12. Use the repository analysis to understand the existing
+12. Use repository analysis to understand the existing
     architecture, technology stack, dependencies, entry points
     and major modules before planning implementation.
 
@@ -132,7 +144,6 @@ REVISION HANDLING RULES:
 - Assign revision tasks using the existing developer assignment rules.
 - If the feedback is already satisfied, return an empty tasks list
   and explain why in architecture_summary.
-
 
 AVAILABLE DEVELOPERS:
 
@@ -158,7 +169,6 @@ AVAILABLE DEVELOPERS:
    - Indexes and constraints
    - Database queries and optimization
 
-
 DEVELOPER ASSIGNMENT RULES:
 
 - Every task must have exactly one assigned developer.
@@ -172,7 +182,6 @@ DEVELOPER ASSIGNMENT RULES:
 - Never assign one task to multiple developers.
 - Do not create artificial tasks to involve every developer.
 - A project may require only one developer.
-
 
 TASK DECOMPOSITION RULES:
 
@@ -189,7 +198,6 @@ TASK DECOMPOSITION RULES:
 - Do not create unnecessary tasks.
 - Do not assign implementation tasks for functionality
   that is already demonstrably complete.
-
 
 CRITICAL REQUIREMENT VERIFICATION RULES:
 
@@ -243,8 +251,7 @@ IMPORTANT:
   replacement for inspecting the actual repository tree
   and file contents.
 - Do not assume repository analysis is always complete.
-- Resolve conflicts using the actual repository evidence.
-
+- Resolve conflicts using actual repository evidence.
 
 TASK ACCEPTANCE CRITERIA:
 
@@ -257,7 +264,6 @@ TASK ACCEPTANCE CRITERIA:
 - Do not turn assumptions into mandatory requirements.
 - Do not modify unrelated functionality.
 - Preserve the user's original scope.
-
 
 EXECUTION BATCHES:
 
@@ -272,7 +278,6 @@ EXECUTION BATCHES:
 - Every dependency must reference a valid task ID.
 - Do not create circular dependencies.
 - Return an empty list if there are no implementation tasks.
-
 
 OUTPUT SCHEMA:
 
@@ -310,7 +315,6 @@ JSON RULES:
 - Do not use Markdown or code fences.
 - Do not include explanations outside the JSON object.
 - Do not invent completed implementation or test results.
-
 
 SECURITY:
 
@@ -369,6 +373,7 @@ Return only the JSON object.
             raise ValueError("Duplicate task IDs found.")
 
         valid_ids = set(task_ids)
+
         batch_ids = [
             task_id
             for batch in result.execution_batches

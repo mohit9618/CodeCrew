@@ -4,7 +4,7 @@ from typing import List
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
-
+from backend.app.llm import get_groq_llm
 from pathlib import Path, PurePosixPath
 
 
@@ -32,10 +32,7 @@ class DeveloperAgent:
     def __init__(self, specialization="general"):
         self.specialization = specialization
         
-        self.llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            temperature=0,
-        )
+        self.llm = get_groq_llm()
 
         self.structured_llm = self.llm.with_structured_output(
             DeveloperOutput,

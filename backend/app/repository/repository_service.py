@@ -4,6 +4,7 @@ import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
+import subprocess
 
 
 WORKSPACE_ROOT = Path("workspace").resolve()
@@ -47,6 +48,7 @@ def validate_github_url(repo_url: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
+
 async def clone_repository(repo_url: str, run_id: str) -> str:
     clone_url = validate_github_url(repo_url)
 
@@ -63,35 +65,35 @@ async def clone_repository(repo_url: str, run_id: str) -> str:
     if workspace.exists():
         raise RepositoryError("Workspace already exists.")
 
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        "clone",
-        "--depth", "1",
-        "--single-branch",
-        clone_url,
-        str(workspace),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-
     try:
-        _, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=CLONE_TIMEOUT
+        process = await asyncio.to_thread(
+            subprocess.run,
+            [
+                "git",
+                "clone",
+                "--depth", "1",
+                "--single-branch",
+                clone_url,
+                str(workspace)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CLONE_TIMEOUT,
+            check=False
         )
 
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
+    except subprocess.TimeoutExpired:
         shutil.rmtree(workspace, ignore_errors=True)
-
         raise RepositoryError("Repository cloning timed out.")
+
+    except FileNotFoundError:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise RepositoryError(
+            "Git executable not found. Install Git and add it to PATH."
+        )
 
     if process.returncode != 0:
         shutil.rmtree(workspace, ignore_errors=True)
-
-        raise RepositoryError(
-            stderr.decode(errors="replace")[-2000:]
-        )
+        raise RepositoryError(process.stderr[-2000:])
 
     return str(workspace)

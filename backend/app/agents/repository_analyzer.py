@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
-
+from backend.app.llm import get_groq_llm
 from pydantic import BaseModel, Field , model_validator
 from langchain_groq import ChatGroq
 
@@ -48,13 +48,13 @@ SOURCE_EXTENSIONS = {
     ".yml", ".json", ".toml"
 }
 
-MAX_FILES = 25
-MAX_FILE_SIZE = 8_000
-MAX_TOTAL_SIZE = 20_000
+MAX_FILES = 15
+MAX_FILE_SIZE = 5_000
+MAX_TOTAL_SIZE = 12_000
 
-MAX_ANALYSIS_TREE_SIZE = 3_000
-MAX_ANALYSIS_CONTENT_SIZE = 9_000
-MAX_ANALYSIS_REQUEST_SIZE = 5_000
+MAX_ANALYSIS_TREE_SIZE = 2_000
+MAX_ANALYSIS_CONTENT_SIZE = 6_000
+MAX_ANALYSIS_REQUEST_SIZE = 3_000
 
 
 
@@ -149,10 +149,7 @@ class RepositoryAnalysis(BaseModel):
 class RepositoryAnalyzerAgent:
 
     def __init__(self):
-        self.llm = ChatGroq(
-                    model="openai/gpt-oss-120b",
-                    temperature=0
-                )
+        self.llm = get_groq_llm()
 
         self.structured_llm = self.llm.with_structured_output(
             RepositoryAnalysis,

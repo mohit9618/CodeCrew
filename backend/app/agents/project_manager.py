@@ -4,6 +4,7 @@ import json
 from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
+from backend.app.llm import get_groq_llm
 
 load_dotenv()
 
@@ -24,10 +25,7 @@ class ProjectSpecification(BaseModel):
 
 class ProjectManagerAgent:
     def __init__(self):
-        self.llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            temperature=0
-        )
+        self.llm = get_groq_llm()
 
     async def create_specification(
         self,

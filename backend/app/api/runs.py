@@ -1,4 +1,6 @@
 
+import traceback
+
 from uuid import uuid4
 
 from fastapi import APIRouter, Request, HTTPException
@@ -33,10 +35,19 @@ async def create_run(
     run_id = str(uuid4())
 
     try:
+        print("\n========== CODECREW RUN STARTED ==========", flush=True)
+        print(f"Run ID: {run_id}", flush=True)
+
+        print("\n[1] Cloning repository...", flush=True)
+
         workspace = await clone_repository(
             str(data.repo_url),
             run_id
         )
+
+        print(f"Workspace: {workspace}", flush=True)
+
+        print("\n[2] Running Repository Analyzer...", flush=True)
 
         analyzer = RepositoryAnalyzerAgent()
 
@@ -44,6 +55,10 @@ async def create_run(
             workspace=workspace,
             request=data.request
         )
+
+        print("Repository analysis completed.", flush=True)
+
+        print("\n[3] Initializing workflow state...", flush=True)
 
         initial_state = {
             "request": data.request,
@@ -59,11 +74,15 @@ async def create_run(
             "status": "running"
         }
 
+        print("\n[4] Starting LangGraph workflow...", flush=True)
+
         result = await run_workflow(
             request.app.state.workflow,
             run_id,
             initial_state
         )
+
+        print("\n========== WORKFLOW COMPLETED ==========", flush=True)
 
         return {
             "run_id": run_id,
@@ -72,15 +91,25 @@ async def create_run(
         }
 
     except RepositoryError as error:
+        print("\n========== REPOSITORY ERROR ==========", flush=True)
+        print(repr(error), flush=True)
+        traceback.print_exc()
+
         raise HTTPException(
             status_code=400,
             detail=str(error)
         )
 
     except Exception as error:
+        print("\n========== CODECREW ERROR ==========", flush=True)
+        print("ERROR TYPE:", type(error).__name__, flush=True)
+        print("ERROR:", repr(error), flush=True)
+        traceback.print_exc()
+        print("====================================\n", flush=True)
+
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail=f"{type(error).__name__}: {str(error) or 'No error message'}"
         )
 
 
@@ -106,10 +135,12 @@ async def get_run_status(
     except HTTPException:
         raise
 
-    except Exception as error:
+    except Exception:
+        traceback.print_exc()
+
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail="Failed to retrieve run status. Check backend logs."
         )
 
 
@@ -135,10 +166,12 @@ async def get_run_history(
     except HTTPException:
         raise
 
-    except Exception as error:
+    except Exception:
+        traceback.print_exc()
+
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail="Failed to retrieve run history. Check backend logs."
         )
 
 
@@ -162,8 +195,10 @@ async def resume_run(
             "result": result
         }
 
-    except Exception as error:
+    except Exception:
+        traceback.print_exc()
+
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail="Failed to resume workflow. Check backend logs."
         )

@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field , AliasChoices
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
+from backend.app.llm import get_groq_llm
 
 load_dotenv()
 
@@ -41,10 +42,7 @@ class ReviewerOutput(BaseModel):
 
 class ReviewerAgent:
     def __init__(self):
-        self.llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            temperature=0
-        )
+        self.llm = get_groq_llm()
 
         self.structured_llm = self.llm.with_structured_output(
             ReviewerOutput,
