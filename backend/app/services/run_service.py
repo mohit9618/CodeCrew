@@ -20,6 +20,30 @@ async def run_workflow(
 
     return result
 
+from langgraph.types import Command
+
+
+async def resume_workflow(
+    workflow: CompiledStateGraph,
+    run_id: str,
+    decision: str,
+    feedback: str = ""
+):
+    config = {
+        "configurable": {
+            "thread_id": run_id
+        }
+    }
+
+    result = await workflow.ainvoke(
+        Command(resume={
+            "decision": decision,
+            "feedback": feedback
+        }),
+        config
+    )
+
+    return result
 
 async def get_workflow_state(
     workflow: CompiledStateGraph,

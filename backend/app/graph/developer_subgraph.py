@@ -57,7 +57,14 @@ async def backend_stage_node(state: CodeCrewState) -> dict:
 
         for task in tasks:
             output = await developer.generate_changes(
-                task=str(task),
+                task=f"""
+                {task}
+
+                HUMAN REVIEW FEEDBACK:
+                {state.get("approval_feedback", "")}
+
+                Address this feedback while preserving existing functionality.
+                """,
                 repo_tree=state.get("working_repo_tree", state.get("repo_tree", "")),
                 file_contents=state.get("working_file_contents", state.get("file_contents", ""))
             )
@@ -103,7 +110,7 @@ async def backend_stage_node(state: CodeCrewState) -> dict:
             "applied_files": list(dict.fromkeys(applied_files)),
             "working_repo_tree": updated_tree,
             "working_file_contents": updated_contents,
-            "stage_summary": summaries,
+            "stage_summary": state.get("stage_summary", []) + summaries,
             "developer_stage": "backend_completed",
             "status": "backend_completed"
         }
@@ -135,7 +142,14 @@ async def database_stage_node(state: CodeCrewState) -> dict:
 
         for task in tasks:
             output = await developer.generate_changes(
-                task=str(task),
+                task=f"""
+                {task}
+
+                HUMAN REVIEW FEEDBACK:
+                {state.get("approval_feedback", "")}
+
+                Address this feedback while preserving existing functionality.
+                """,
                 repo_tree=state.get("working_repo_tree", ""),
                 file_contents=state.get("working_file_contents", "")
             )
@@ -181,7 +195,7 @@ async def database_stage_node(state: CodeCrewState) -> dict:
             "applied_files": list(dict.fromkeys(applied_files)),
             "working_repo_tree": updated_tree,
             "working_file_contents": updated_contents,
-            "stage_summary": summaries,
+            "stage_summary": state.get("stage_summary", []) + summaries,
             "developer_stage": "database_completed",
             "status": "database_completed"
         }
@@ -213,7 +227,14 @@ async def frontend_stage_node(state: CodeCrewState) -> dict:
 
         for task in tasks:
             output = await developer.generate_changes(
-                task=str(task),
+                task=f"""
+                {task}
+
+                HUMAN REVIEW FEEDBACK:
+                {state.get("approval_feedback", "")}
+
+                Address this feedback while preserving existing functionality.
+                """,
                 repo_tree=state.get("working_repo_tree", ""),
                 file_contents=state.get("working_file_contents", "")
             )
@@ -259,7 +280,7 @@ async def frontend_stage_node(state: CodeCrewState) -> dict:
             "applied_files": list(dict.fromkeys(applied_files)),
             "working_repo_tree": updated_tree,
             "working_file_contents": updated_contents,
-            "stage_summary": summaries,
+            "stage_summary": state.get("stage_summary", []) + summaries,
             "developer_stage": "frontend_completed",
             "status": "frontend_completed"
         }
@@ -269,22 +290,28 @@ async def frontend_stage_node(state: CodeCrewState) -> dict:
 
 
 def initialize_developer_state(state: CodeCrewState) -> dict:
+    print("DEVELOPER TASK ASSIGNMENTS:", [
+    (task.get("task_id"), task.get("assigned_developer"))
+    for task in state.get("tasks", [])
+    ])
     return {
-        "working_repo_tree": state.get("repo_tree", ""),
-        "working_file_contents": state.get("file_contents", ""),
+        "working_repo_tree": state.get("working_repo_tree", state.get("repo_tree", "")),
+        "working_file_contents": state.get("working_file_contents", state.get("file_contents", "")),
         "applied_files": state.get("applied_files", []),
+        "stage_summary": [],
         "developer_stage": "backend"
     }
 
 def finalize_development_node(state: CodeCrewState) -> dict:
-    stage_summary = state.get("stage_summary", [])
-    applied_files = state.get("applied_files", [])
+    stage_summary = state.get("stage_summary") or []
+    applied_files = state.get("applied_files") or []
 
     return {
         "developer_stage": "completed",
         "status": "testing",
         "implementation_summary": "\n".join(stage_summary),
-        "applied_files": applied_files
+        "applied_files": applied_files,
+        "approval_feedback": "",
     }
 
 graph = StateGraph(CodeCrewState)

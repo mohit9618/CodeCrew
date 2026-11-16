@@ -6,6 +6,7 @@ from backend.app.agents.project_manager import ProjectManagerAgent
 from backend.app.agents.architect import ArchitectAgent
 from backend.app.agents.developer import DeveloperAgent
 from backend.app.agents.tester import TesterAgent
+from backend.app.agents.reviewer import ReviewerAgent
 
 from backend.app.mcp.clients.filesystem import FilesystemClient
 from sandbox.execution import run_tests
@@ -27,11 +28,14 @@ async def intake_node(state: dict) -> dict:
     }
 
 
+
+
 async def project_manager_node(state: dict) -> dict:
     project_manager = ProjectManagerAgent()
 
     output = await project_manager.create_specification(
-        state["intake_result"]
+        intake_result=state["intake_result"],
+        repository_analysis=state["repository_analysis"]
     )
 
     return {
@@ -45,8 +49,10 @@ async def architect_node(state: dict) -> dict:
 
     output = await architect.design_architecture(
         project_spec=state["project_spec"],
-        repo_tree=state["repo_tree"],
-        file_contents=state["file_contents"]
+        repo_tree=state.get("working_repo_tree") or state["repo_tree"],
+        file_contents=state.get("working_file_contents") or state["file_contents"],
+        repository_analysis=state["repository_analysis"],
+        revision_feedback=state.get("revision_feedback", "")
     )
 
     architecture = output.model_dump()
@@ -57,6 +63,7 @@ async def architect_node(state: dict) -> dict:
         "execution_batches": architecture["execution_batches"],
         "status": "architecture_completed"
     }
+
 
 
 async def developer_node(state: dict) -> dict:
@@ -162,4 +169,28 @@ async def tester_node(state: dict) -> dict:
         "test_report": analysis.model_dump(),
         "status": "passed" if passed else "failed",
         "last_error": last_error
+    }
+
+
+async def reviewer_node(state: dict) -> dict:
+    reviewer = ReviewerAgent()
+
+    result = await reviewer.review_implementation(
+        request=state["request"],
+        project_spec=state["project_spec"],
+        tasks=state["tasks"],
+        implementation_summary=state["implementation_summary"],
+        applied_files=state["applied_files"],
+        file_contents=state.get(
+            "working_file_contents",
+            state["file_contents"]
+        ),
+        test_report=state["test_report"]
+    )
+
+    review_report = result.model_dump()
+
+    return {
+        "review_report": review_report,
+        "review_status": result.overall_status
     }
