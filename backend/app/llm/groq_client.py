@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import time
@@ -7,7 +6,7 @@ from collections import deque
 from dotenv import load_dotenv
 from groq import RateLimitError
 from langchain_groq import ChatGroq
-
+from pydantic import PrivateAttr
 
 load_dotenv()
 
@@ -70,26 +69,30 @@ class GroqRateLimiter:
 
 
 class SharedGroqClient(ChatGroq):
+    _rate_limiter: GroqRateLimiter = PrivateAttr()
+    _reserved_output_tokens: int = PrivateAttr()
+    _max_retries: int = PrivateAttr()
+
     def __init__(self, limiter: GroqRateLimiter, **kwargs):
-        self.rate_limiter = limiter
-        self.reserved_output_tokens = int(
-            os.getenv("GROQ_MAX_TOKENS", "1200")
-        )
-        self.max_retries = int(
-            os.getenv("GROQ_MAX_RETRIES", "4")
-        )
+        output_tokens = kwargs.get("max_tokens")
+        if output_tokens is None:
+            output_tokens = int(os.getenv("GROQ_MAX_TOKENS", "1200"))
+
+        kwargs["max_tokens"] = int(output_tokens)
 
         super().__init__(**kwargs)
 
+        self._rate_limiter = limiter
+        self._reserved_output_tokens = int(output_tokens)
+        self._max_retries = int(
+            os.getenv("GROQ_MAX_RETRIES", "4")
+        )
+
     def estimate_tokens(self, input_data) -> int:
-        """
-        Conservative character-based estimate.
-        This is not an exact tokenizer.
-        """
         input_chars = len(str(input_data))
         input_tokens = max(1, input_chars // 4)
 
-        return input_tokens + self.reserved_output_tokens
+        return input_tokens + self._reserved_output_tokens
 
     def get_retry_delay(self, error, attempt: int) -> float:
         response = getattr(error, "response", None)
@@ -108,9 +111,9 @@ class SharedGroqClient(ChatGroq):
     async def ainvoke(self, input, config=None, **kwargs):
         token_estimate = self.estimate_tokens(input)
 
-        await self.rate_limiter.acquire(token_estimate)
+        await self._rate_limiter.acquire(token_estimate)
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(self._max_retries + 1):
             try:
                 return await super().ainvoke(
                     input,
@@ -119,47 +122,45 @@ class SharedGroqClient(ChatGroq):
                 )
 
             except RateLimitError as error:
-                if attempt == self.max_retries:
+                if attempt == self._max_retries:
                     raise
 
                 wait_time = self.get_retry_delay(error, attempt)
 
                 print(
-                    f"[Groq 429] Rate limit reached. "
-                    f"Retrying in {wait_time:.1f}s "
-                    f"({attempt + 1}/{self.max_retries})"
+                    f"[Groq 429] Retrying in {wait_time:.1f}s "
+                    f"({attempt + 1}/{self._max_retries})"
                 )
 
                 await asyncio.sleep(wait_time)
 
 
 _tpm_limit = int(os.getenv("GROQ_TPM_LIMIT", "8000"))
-_safety_margin = int(
-    os.getenv("GROQ_TPM_SAFETY_MARGIN", "1000")
-)
+_safety_margin = int(os.getenv("GROQ_TPM_SAFETY_MARGIN", "1000"))
 
 _shared_limiter = GroqRateLimiter(
     tpm_limit=_tpm_limit,
     safety_margin=_safety_margin
 )
 
-_shared_client = None
+_shared_clients = {}
 
 
-def get_groq_llm():
-    global _shared_client
+def get_groq_llm(max_tokens: int | None = None):
+    if max_tokens is None:
+        max_tokens = int(os.getenv("GROQ_MAX_TOKENS", "1200"))
 
-    if _shared_client is None:
-        _shared_client = SharedGroqClient(
+    max_tokens = int(max_tokens)
+
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be greater than zero.")
+
+    if max_tokens not in _shared_clients:
+        _shared_clients[max_tokens] = SharedGroqClient(
             limiter=_shared_limiter,
-            model=os.getenv(
-                "GROQ_MODEL",
-                "openai/gpt-oss-120b"
-            ),
+            model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
             temperature=0,
-            max_tokens=int(
-                os.getenv("GROQ_MAX_TOKENS", "1200")
-            )
+            max_tokens=max_tokens
         )
 
-    return _shared_client
+    return _shared_clients[max_tokens]

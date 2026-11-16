@@ -100,6 +100,11 @@ class FilesystemClient:
                 "pattern": pattern
             }
         )
+    async def create_directory(self, path: str):
+        return await self.call_tool(
+            "create_directory",
+            {"path": path}
+        )
 
 
 async def main():

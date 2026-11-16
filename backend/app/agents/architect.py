@@ -66,7 +66,7 @@ class ArchitectureOutput(BaseModel):
 
 class ArchitectAgent:
     def __init__(self):
-        self.llm = get_groq_llm()
+        self.llm = get_groq_llm(max_tokens=3000)
 
     async def design_architecture(
         self,
@@ -356,7 +356,27 @@ Return only the JSON object.
                 "Architect did not return a valid JSON object."
             )
 
-        data = json.loads(content[start:end + 1])
+        json_content = content[start:end + 1]
+
+        try:
+            data = json.loads(json_content)
+        except json.JSONDecodeError as error:
+            print("\n========== ARCHITECT RAW RESPONSE ==========")
+            print(repr(content))
+
+            print("\n========== EXTRACTED JSON ==========")
+            print(repr(json_content))
+
+            print("\n========== RESPONSE METADATA ==========")
+            print(response.response_metadata)
+
+            print("\n========== JSON ERROR ==========")
+            print(f"Line: {error.lineno}")
+            print(f"Column: {error.colno}")
+            print(f"Position: {error.pos}")
+            print(f"Error: {error.msg}")
+            print("==========================================\n")
+            raise
 
         result = ArchitectureOutput.model_validate(data)
 
@@ -365,53 +385,70 @@ Return only the JSON object.
         return result
 
     @staticmethod
+    
+    @staticmethod
     def validate_execution_plan(result: ArchitectureOutput):
-
-        task_ids = [task.task_id for task in result.tasks]
-
-        if len(task_ids) != len(set(task_ids)):
-            raise ValueError("Duplicate task IDs found.")
-
-        valid_ids = set(task_ids)
-
-        batch_ids = [
-            task_id
-            for batch in result.execution_batches
-            for task_id in batch
-        ]
-
-        if len(batch_ids) != len(set(batch_ids)):
-            raise ValueError(
-                "A task appears more than once in execution batches."
-            )
-
-        if set(batch_ids) != valid_ids:
-            raise ValueError(
-                "Execution batches must contain every task exactly once."
-            )
-
         task_map = {
             task.task_id: task
             for task in result.tasks
         }
 
+        task_ids = list(task_map)
+
+        if len(task_ids) != len(result.tasks):
+            raise ValueError("Duplicate task IDs found.")
+
+        valid_ids = set(task_ids)
+
+        for task in result.tasks:
+            for dependency in task.dependencies:
+                if dependency not in valid_ids:
+                    raise ValueError(
+                        f"Unknown dependency '{dependency}' "
+                        f"in task '{task.task_id}'."
+                    )
+
+                if dependency == task.task_id:
+                    raise ValueError(
+                        f"Task '{task.task_id}' cannot depend on itself."
+                    )
+
         completed_ids = set()
+        execution_batches = []
 
-        for batch in result.execution_batches:
-            for task_id in batch:
-                task = task_map[task_id]
+        while len(completed_ids) < len(task_ids):
+            current_batch = []
+            batch_files = set()
 
-                for dependency in task.dependencies:
-                    if dependency not in valid_ids:
-                        raise ValueError(
-                            f"Unknown dependency '{dependency}' "
-                            f"in task '{task_id}'."
-                        )
+            for task in result.tasks:
+                task_id = task.task_id
 
-                    if dependency not in completed_ids:
-                        raise ValueError(
-                            f"Dependency '{dependency}' must be "
-                            f"completed before task '{task_id}'."
-                        )
+                if task_id in completed_ids:
+                    continue
 
-            completed_ids.update(batch)
+                if not set(task.dependencies).issubset(completed_ids):
+                    continue
+
+                modify_files = set(task.files_to_modify)
+
+                if modify_files & batch_files:
+                    continue
+
+                current_batch.append(task_id)
+                batch_files.update(modify_files)
+
+            if not current_batch:
+                remaining = [
+                    task_id
+                    for task_id in task_ids
+                    if task_id not in completed_ids
+                ]
+
+                raise ValueError(
+                    f"Circular or unsatisfied task dependencies: {remaining}"
+                )
+
+            execution_batches.append(current_batch)
+            completed_ids.update(current_batch)
+
+        result.execution_batches = execution_batches

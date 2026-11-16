@@ -25,7 +25,7 @@ class ProjectSpecification(BaseModel):
 
 class ProjectManagerAgent:
     def __init__(self):
-        self.llm = get_groq_llm()
+        self.llm = get_groq_llm(max_tokens=2500)
 
     async def create_specification(
         self,
@@ -159,6 +159,16 @@ Do not return null values.
                 and block.get("type") == "text"
             )
 
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as error:
+            print("\n========== PROJECT MANAGER RAW RESPONSE ==========")
+            print(content)
+            print("\n========== JSON ERROR LOCATION ==========")
+            print(f"Line: {error.lineno}")
+            print(f"Column: {error.colno}")
+            print(f"Error: {error.msg}")
+            print("===============================================\n")
+            raise
 
         return ProjectSpecification.model_validate(data)

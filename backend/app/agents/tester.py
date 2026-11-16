@@ -1,8 +1,9 @@
 
+import json
+import re
 from typing import List
 
 from pydantic import BaseModel, Field
-from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from backend.app.llm import get_groq_llm
 
@@ -11,12 +12,8 @@ load_dotenv()
 
 class TestResult(BaseModel):
     test_name: str = Field(description="Name of the test")
-    status: str = Field(
-        description="passed, failed, or skipped"
-    )
-    details: str = Field(
-        description="Test output or failure reason"
-    )
+    status: str = Field(description="passed, failed, or skipped")
+    details: str = Field(description="Test output or failure reason")
 
 
 class TesterOutput(BaseModel):
@@ -26,13 +23,10 @@ class TesterOutput(BaseModel):
     passed_count: int
     failed_count: int
     skipped_count: int
-
     results: List[TestResult]
-
     analysis: str = Field(
         description="Analysis of the test execution"
     )
-
     issues: List[str] = Field(
         default_factory=list,
         description="Issues that need developer attention"
@@ -44,9 +38,26 @@ class TesterAgent:
     def __init__(self):
         self.llm = get_groq_llm()
 
-        self.structured_llm = self.llm.with_structured_output(
-            TesterOutput
+    def extract_json(self, content: str) -> dict:
+        content = content.strip()
+
+        content = re.sub(
+            r"```(?:json)?\s*",
+            "",
+            content,
+            flags=re.IGNORECASE
         )
+        content = content.replace("```", "").strip()
+
+        start = content.find("{")
+
+        if start == -1:
+            raise ValueError("No JSON object found in model response")
+
+        decoder = json.JSONDecoder()
+        result, _ = decoder.raw_decode(content[start:])
+
+        return result
 
     async def analyze_results(
         self,
@@ -57,39 +68,90 @@ class TesterAgent:
     ) -> TesterOutput:
 
         prompt = f"""
-        You are the Tester Agent of CodeCrew.
+You are the Tester Agent of CodeCrew.
 
-        Your responsibility is to analyze test execution results.
+Analyze the provided test execution results.
 
-        DEVELOPMENT TASK:
-        {task}
+DEVELOPMENT TASK:
+{task}
 
-        IMPLEMENTATION SUMMARY:
-        {implementation_summary}
+IMPLEMENTATION SUMMARY:
+{implementation_summary}
 
-        TEST EXECUTION OUTPUT:
-        {test_output}
+TEST EXECUTION OUTPUT:
+{test_output}
 
-        EXIT CODE:
-        {exit_code}
+EXIT CODE:
+{exit_code}
 
-        Instructions:
+Instructions:
+1. Analyze only the provided execution output.
+2. Identify passed, failed, and skipped tests.
+3. Never invent test names or test results.
+4. Identify errors and failure reasons.
+5. If execution failed before tests could run, use needs_attention.
+6. If the exit code is non-zero, never report passed.
+7. Suggest actionable issues for the Developer Agent.
+8. Do not claim requirements are satisfied without test evidence.
+9. Distinguish test failures from environment or dependency errors.
+10. If no tests actually executed, all three counts must be zero.
+11. Return only one valid JSON object. Do not include explanations,
+    markdown, code fences, or reasoning outside the JSON.
 
-        1. Analyze only the provided execution output.
-        2. Identify passed, failed, and skipped tests.
-        3. Never invent test results.
-        4. Identify errors and failure reasons.
-        5. If execution failed before tests could run,
-           report needs_attention.
-        6. If the exit code is non-zero, do not report
-           overall_status as passed.
-        7. Suggest issues that the Developer Agent should fix.
-        8. Do not claim that requirements are satisfied
-           without supporting test evidence.
+Required JSON structure:
+{{
+    "overall_status": "passed | failed | needs_attention",
+    "passed_count": 0,
+    "failed_count": 0,
+    "skipped_count": 0,
+    "results": [
+        {{
+            "test_name": "test name",
+            "status": "passed | failed | skipped",
+            "details": "test details"
+        }}
+    ],
+    "analysis": "analysis of execution",
+    "issues": ["actionable issue"]
+}}
+"""
 
-        Return structured test results.
-        """
+        try:
+            response = await self.llm.ainvoke(prompt)
 
-        result = await self.structured_llm.ainvoke(prompt)
+            content = response.content
 
-        return result
+            if isinstance(content, list):
+                content = "".join(
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict)
+                )
+
+            data = self.extract_json(str(content))
+
+            result = TesterOutput.model_validate(data)
+
+            if exit_code != 0 and result.overall_status == "passed":
+                result.overall_status = "needs_attention"
+
+            return result
+
+        except Exception as error:
+            print(f"TESTER AGENT PARSING ERROR: {error}")
+
+            return TesterOutput(
+                overall_status="needs_attention",
+                passed_count=0,
+                failed_count=0,
+                skipped_count=0,
+                results=[],
+                analysis=(
+                    "Tester Agent could not reliably parse the model response. "
+                    "The test execution output requires manual review."
+                ),
+                issues=[
+                    f"Tester Agent response parsing failed: {str(error)}",
+                    "Review the original test execution output."
+                ]
+            )

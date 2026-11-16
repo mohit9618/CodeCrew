@@ -1,4 +1,3 @@
-
 from pathlib import Path, PurePosixPath
 
 from langgraph.graph import StateGraph, START, END
@@ -34,6 +33,47 @@ def get_safe_paths(paths: list[str], workspace: str) -> list[str]:
     return safe_paths
 
 
+async def get_task_file_contents(task: dict, filesystem, workspace: str) -> str:
+    requested_paths = list(dict.fromkeys(
+        task.get("files_to_read", [])
+        + task.get("files_to_modify", [])
+    ))
+
+    safe_paths = get_safe_paths(requested_paths, workspace)
+
+    existing_paths = [
+        path for path in safe_paths
+        if Path(path).is_file()
+    ]
+
+    if not existing_paths:
+        return ""
+
+    return await filesystem.read_multiple_files(existing_paths)
+
+
+def log_developer_input(
+    stage: str,
+    task: dict,
+    task_text: str,
+    repo_tree: str,
+    file_contents: str
+) -> None:
+    task_chars = len(task_text)
+    tree_chars = len(repo_tree)
+    file_chars = len(file_contents)
+    total_chars = task_chars + tree_chars + file_chars
+
+    print(f"\\n========== {stage.upper()} DEVELOPER INPUT ==========")
+    print(f"Task ID: {task.get('task_id')}")
+    print(f"Task characters: {task_chars:,}")
+    print(f"Repository tree characters: {tree_chars:,}")
+    print(f"File contents characters: {file_chars:,}")
+    print(f"Total input characters: {total_chars:,}")
+    print(f"Rough input token estimate: {total_chars // 4:,}")
+    print("==============================================\\n")
+
+
 async def backend_stage_node(state: CodeCrewState) -> dict:
     tasks = [
         task for task in state.get("tasks", [])
@@ -56,17 +96,34 @@ async def backend_stage_node(state: CodeCrewState) -> dict:
         developer = BackendDeveloper()
 
         for task in tasks:
+            task_file_contents = await get_task_file_contents(
+                task,
+                filesystem,
+                state["workspace"]
+            )
+
+            task_text = f"""
+{task}
+
+HUMAN REVIEW FEEDBACK:
+{state.get("approval_feedback", "")}
+
+Address this feedback while preserving existing functionality.
+"""
+            repo_tree = ""
+
+            log_developer_input(
+                "backend",
+                task,
+                task_text,
+                repo_tree,
+                task_file_contents
+            )
+
             output = await developer.generate_changes(
-                task=f"""
-                {task}
-
-                HUMAN REVIEW FEEDBACK:
-                {state.get("approval_feedback", "")}
-
-                Address this feedback while preserving existing functionality.
-                """,
-                repo_tree=state.get("working_repo_tree", state.get("repo_tree", "")),
-                file_contents=state.get("working_file_contents", state.get("file_contents", ""))
+                task=task_text,
+                repo_tree=repo_tree,
+                file_contents=task_file_contents
             )
 
             if output.questions:
@@ -95,7 +152,10 @@ async def backend_stage_node(state: CodeCrewState) -> dict:
 
             updated_contents = (
                 await filesystem.read_multiple_files(read_paths)
-                if read_paths else state.get("working_file_contents", state.get("file_contents", ""))
+                if read_paths else state.get(
+                    "working_file_contents",
+                    state.get("file_contents", "")
+                )
             )
 
             updated_tree = await filesystem.get_directory_tree()
@@ -141,17 +201,34 @@ async def database_stage_node(state: CodeCrewState) -> dict:
         developer = DatabaseDeveloper()
 
         for task in tasks:
+            task_file_contents = await get_task_file_contents(
+                task,
+                filesystem,
+                state["workspace"]
+            )
+
+            task_text = f"""
+{task}
+
+HUMAN REVIEW FEEDBACK:
+{state.get("approval_feedback", "")}
+
+Address this feedback while preserving existing functionality.
+"""
+            repo_tree = ""
+
+            log_developer_input(
+                "database",
+                task,
+                task_text,
+                repo_tree,
+                task_file_contents
+            )
+
             output = await developer.generate_changes(
-                task=f"""
-                {task}
-
-                HUMAN REVIEW FEEDBACK:
-                {state.get("approval_feedback", "")}
-
-                Address this feedback while preserving existing functionality.
-                """,
-                repo_tree=state.get("working_repo_tree", ""),
-                file_contents=state.get("working_file_contents", "")
+                task=task_text,
+                repo_tree=repo_tree,
+                file_contents=task_file_contents
             )
 
             if output.questions:
@@ -226,17 +303,34 @@ async def frontend_stage_node(state: CodeCrewState) -> dict:
         developer = FrontendDeveloper()
 
         for task in tasks:
+            task_file_contents = await get_task_file_contents(
+                task,
+                filesystem,
+                state["workspace"]
+            )
+
+            task_text = f"""
+{task}
+
+HUMAN REVIEW FEEDBACK:
+{state.get("approval_feedback", "")}
+
+Address this feedback while preserving existing functionality.
+"""
+            repo_tree = ""
+
+            log_developer_input(
+                "frontend",
+                task,
+                task_text,
+                repo_tree,
+                task_file_contents
+            )
+
             output = await developer.generate_changes(
-                task=f"""
-                {task}
-
-                HUMAN REVIEW FEEDBACK:
-                {state.get("approval_feedback", "")}
-
-                Address this feedback while preserving existing functionality.
-                """,
-                repo_tree=state.get("working_repo_tree", ""),
-                file_contents=state.get("working_file_contents", "")
+                task=task_text,
+                repo_tree=repo_tree,
+                file_contents=task_file_contents
             )
 
             if output.questions:
@@ -291,16 +385,24 @@ async def frontend_stage_node(state: CodeCrewState) -> dict:
 
 def initialize_developer_state(state: CodeCrewState) -> dict:
     print("DEVELOPER TASK ASSIGNMENTS:", [
-    (task.get("task_id"), task.get("assigned_developer"))
-    for task in state.get("tasks", [])
+        (task.get("task_id"), task.get("assigned_developer"))
+        for task in state.get("tasks", [])
     ])
+
     return {
-        "working_repo_tree": state.get("working_repo_tree", state.get("repo_tree", "")),
-        "working_file_contents": state.get("working_file_contents", state.get("file_contents", "")),
+        "working_repo_tree": state.get(
+            "working_repo_tree",
+            state.get("repo_tree", "")
+        ),
+        "working_file_contents": state.get(
+            "working_file_contents",
+            state.get("file_contents", "")
+        ),
         "applied_files": state.get("applied_files", []),
         "stage_summary": [],
         "developer_stage": "backend"
     }
+
 
 def finalize_development_node(state: CodeCrewState) -> dict:
     stage_summary = state.get("stage_summary") or []
@@ -311,8 +413,9 @@ def finalize_development_node(state: CodeCrewState) -> dict:
         "status": "testing",
         "implementation_summary": "\n".join(stage_summary),
         "applied_files": applied_files,
-        "approval_feedback": "",
+        "approval_feedback": ""
     }
+
 
 graph = StateGraph(CodeCrewState)
 
@@ -330,5 +433,3 @@ graph.add_edge("frontend", "finalize")
 graph.add_edge("finalize", END)
 
 developer_subgraph = graph.compile()
-
-
