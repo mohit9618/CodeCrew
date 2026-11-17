@@ -110,7 +110,7 @@ HUMAN REVIEW FEEDBACK:
 
 Address this feedback while preserving existing functionality.
 """
-            repo_tree = ""
+            repo_tree = state.get("working_repo_tree") or state.get("repo_tree", "")
 
             log_developer_input(
                 "backend",
@@ -215,7 +215,7 @@ HUMAN REVIEW FEEDBACK:
 
 Address this feedback while preserving existing functionality.
 """
-            repo_tree = ""
+            repo_tree = state.get("working_repo_tree") or state.get("repo_tree", "")
 
             log_developer_input(
                 "database",
@@ -317,7 +317,7 @@ HUMAN REVIEW FEEDBACK:
 
 Address this feedback while preserving existing functionality.
 """
-            repo_tree = ""
+            repo_tree = state.get("working_repo_tree") or state.get("repo_tree", "")
 
             log_developer_input(
                 "frontend",
@@ -390,13 +390,11 @@ def initialize_developer_state(state: CodeCrewState) -> dict:
     ])
 
     return {
-        "working_repo_tree": state.get(
-            "working_repo_tree",
-            state.get("repo_tree", "")
+        "working_repo_tree": (
+            state.get("working_repo_tree") or state.get("repo_tree", "")
         ),
-        "working_file_contents": state.get(
-            "working_file_contents",
-            state.get("file_contents", "")
+        "working_file_contents": (
+            state.get("working_file_contents") or state.get("file_contents", "")
         ),
         "applied_files": state.get("applied_files", []),
         "stage_summary": [],
