@@ -25,6 +25,26 @@ class DeveloperOutput(BaseModel):
     )
 
 
+# Prompt-part caps (characters), sized to stay under the 7,000-token budget.
+MAX_TASK_CHARS = 3_000
+MAX_TREE_CHARS = 4_000
+MAX_FILE_CONTENT_CHARS = 6_000
+
+
+def clamp_text(text: str, limit: int, label: str) -> str:
+    text = text or ""
+
+    if len(text) <= limit:
+        return text
+
+    print(
+        f"[Developer] {label} truncated from {len(text):,} "
+        f"to {limit:,} characters to fit the token budget."
+    )
+
+    return text[:limit] + f"\n... ({label} truncated)"
+
+
 class DeveloperAgent:
     def __init__(self, specialization="general"):
         self.specialization = specialization
@@ -41,6 +61,14 @@ class DeveloperAgent:
         repo_tree: str,
         file_contents: str
     ) -> DeveloperOutput:
+        task = clamp_text(task, MAX_TASK_CHARS, "task")
+        repo_tree = clamp_text(repo_tree, MAX_TREE_CHARS, "repository tree")
+        file_contents = clamp_text(
+            file_contents,
+            MAX_FILE_CONTENT_CHARS,
+            "file contents"
+        )
+        
         messages = [
             (
                 "system",

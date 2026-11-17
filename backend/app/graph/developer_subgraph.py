@@ -1,5 +1,7 @@
 from pathlib import Path, PurePosixPath
 
+from backend.app.utils.repo_tree import build_repo_tree
+
 from langgraph.graph import StateGraph, START, END
 
 from backend.app.graph.state import CodeCrewState
@@ -64,14 +66,14 @@ def log_developer_input(
     file_chars = len(file_contents)
     total_chars = task_chars + tree_chars + file_chars
 
-    print(f"\\n========== {stage.upper()} DEVELOPER INPUT ==========")
+    print(f"\n========== {stage.upper()} DEVELOPER INPUT ==========")
     print(f"Task ID: {task.get('task_id')}")
     print(f"Task characters: {task_chars:,}")
     print(f"Repository tree characters: {tree_chars:,}")
     print(f"File contents characters: {file_chars:,}")
     print(f"Total input characters: {total_chars:,}")
     print(f"Rough input token estimate: {total_chars // 4:,}")
-    print("==============================================\\n")
+    print("==============================================\n")
 
 
 async def backend_stage_node(state: CodeCrewState) -> dict:
@@ -158,7 +160,7 @@ Address this feedback while preserving existing functionality.
                 )
             )
 
-            updated_tree = await filesystem.get_directory_tree()
+            updated_tree = build_repo_tree(state["workspace"])
 
             state = {
                 **state,
@@ -260,7 +262,7 @@ Address this feedback while preserving existing functionality.
                 if read_paths else state.get("working_file_contents", "")
             )
 
-            updated_tree = await filesystem.get_directory_tree()
+            updated_tree = build_repo_tree(state["workspace"])
 
             state = {
                 **state,
@@ -362,7 +364,7 @@ Address this feedback while preserving existing functionality.
                 if read_paths else state.get("working_file_contents", "")
             )
 
-            updated_tree = await filesystem.get_directory_tree()
+            updated_tree = build_repo_tree(state["workspace"])
 
             state = {
                 **state,
