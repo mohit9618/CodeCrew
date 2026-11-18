@@ -3,6 +3,8 @@ import asyncio
 import shutil
 from uuid import uuid4
 
+import pytest
+
 from backend.app.repository.repository_service import (
     clone_repository,
     validate_github_url
@@ -13,6 +15,9 @@ from backend.app.agents.repository_analyzer import (
 
 
 REPO_URL = "https://github.com/pallets/flask"
+
+# Clones a real repository and calls Groq.
+pytestmark = pytest.mark.integration
 
 
 async def test_repository_pipeline():

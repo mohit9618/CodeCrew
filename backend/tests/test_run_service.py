@@ -24,7 +24,7 @@ class TestState(TypedDict):
     status: str
 
 
-async def test_node(state: TestState):
+async def echo_node(state: TestState):
     return {"status": "completed"}
 
 
@@ -49,7 +49,7 @@ async def main():
 
         graph = StateGraph(TestState)
 
-        graph.add_node("test", test_node)
+        graph.add_node("test", echo_node)
         graph.add_edge(START, "test")
         graph.add_edge("test", END)
 

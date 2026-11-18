@@ -9,6 +9,17 @@ from .sandbox_config import (
 )
 
 
+def _as_text(value) -> str:
+    # TimeoutExpired carries bytes even when subprocess ran in text mode.
+    if value is None:
+        return ""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+
+    return value
+
+
 def run_tests(workspace: str, test_path: str = "tests"):
     command = [
         "docker", "run",
@@ -50,8 +61,8 @@ def run_tests(workspace: str, test_path: str = "tests"):
     except subprocess.TimeoutExpired as error:
         return {
             "exit_code": -1,
-            "stdout": error.stdout or "",
-            "stderr": error.stderr or "",
+            "stdout": _as_text(error.stdout),
+            "stderr": _as_text(error.stderr),
             "timed_out": True
         }
 

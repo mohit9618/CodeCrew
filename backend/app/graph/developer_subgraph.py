@@ -1,7 +1,5 @@
 from pathlib import Path, PurePosixPath
 
-from backend.app.utils.repo_tree import build_repo_tree
-
 from langgraph.graph import StateGraph, START, END
 
 from backend.app.graph.state import CodeCrewState
@@ -9,6 +7,12 @@ from backend.app.agents.backend_developer import BackendDeveloper
 from backend.app.agents.database_developer import DatabaseDeveloper
 from backend.app.agents.frontend_developer import FrontendDeveloper
 from backend.app.mcp.clients.filesystem import FilesystemClient
+from backend.app.utils.repo_tree import build_repo_tree
+from backend.app.utils.text import clamp_text
+
+# How much of the previous test failure the developer gets to see.
+# The pytest summary is printed last, so the tail is what matters.
+MAX_LAST_ERROR_CHARS = 1_500
 
 
 def get_safe_paths(paths: list[str], workspace: str) -> list[str]:
@@ -54,6 +58,43 @@ async def get_task_file_contents(task: dict, filesystem, workspace: str) -> str:
     return await filesystem.read_multiple_files(existing_paths)
 
 
+def build_task_text(task: dict, state: dict) -> str:
+    """Task description sent to a developer agent.
+
+    Includes the human review feedback and, on a retry, the previous test
+    failure. Without the failure the developer would repeat the same
+    mistake on every attempt. Empty sections are left out so they do not
+    waste tokens.
+    """
+    parts = [str(task)]
+
+    feedback = (state.get("approval_feedback") or "").strip()
+
+    if feedback:
+        parts.append(
+            "HUMAN REVIEW FEEDBACK:\n"
+            f"{feedback}\n\n"
+            "Address this feedback while preserving existing functionality."
+        )
+
+    last_error = (state.get("last_error") or "").strip()
+
+    if last_error:
+        parts.append(
+            "PREVIOUS TEST FAILURE (your last attempt did not pass):\n"
+            + clamp_text(
+                last_error,
+                MAX_LAST_ERROR_CHARS,
+                "previous test failure",
+                keep="tail"
+            )
+            + "\n\nFix the implementation based on this failure. "
+            "Preserve existing functionality and tests."
+        )
+
+    return "\n\n".join(parts)
+
+
 def log_developer_input(
     stage: str,
     task: dict,
@@ -76,16 +117,22 @@ def log_developer_input(
     print("==============================================\n")
 
 
-async def backend_stage_node(state: CodeCrewState) -> dict:
+async def run_developer_stage(
+    state: CodeCrewState,
+    stage: str,
+    assigned_developer: str,
+    developer_class
+) -> dict:
+    """Run every task assigned to one developer type, one after another."""
     tasks = [
         task for task in state.get("tasks", [])
-        if task["assigned_developer"] == "backend_developer"
+        if task["assigned_developer"] == assigned_developer
     ]
 
     if not tasks:
         return {
-            "developer_stage": "backend_skipped",
-            "status": "backend_skipped"
+            "developer_stage": f"{stage}_skipped",
+            "status": f"{stage}_skipped"
         }
 
     filesystem = FilesystemClient(workspace=state["workspace"])
@@ -95,7 +142,7 @@ async def backend_stage_node(state: CodeCrewState) -> dict:
     summaries = []
 
     try:
-        developer = BackendDeveloper()
+        developer = developer_class()
 
         for task in tasks:
             task_file_contents = await get_task_file_contents(
@@ -104,18 +151,15 @@ async def backend_stage_node(state: CodeCrewState) -> dict:
                 state["workspace"]
             )
 
-            task_text = f"""
-{task}
+            task_text = build_task_text(task, state)
 
-HUMAN REVIEW FEEDBACK:
-{state.get("approval_feedback", "")}
-
-Address this feedback while preserving existing functionality.
-"""
-            repo_tree = state.get("working_repo_tree") or state.get("repo_tree", "")
+            repo_tree = (
+                state.get("working_repo_tree")
+                or state.get("repo_tree", "")
+            )
 
             log_developer_input(
-                "backend",
+                stage,
                 task,
                 task_text,
                 repo_tree,
@@ -130,12 +174,14 @@ Address this feedback while preserving existing functionality.
 
             if output.questions:
                 raise RuntimeError(
-                    f"Backend task {task['task_id']} has blockers: {output.questions}"
+                    f"{stage.capitalize()} task {task['task_id']} "
+                    f"has blockers: {output.questions}"
                 )
 
             if not output.changes:
                 raise RuntimeError(
-                    f"Backend task {task['task_id']} generated no changes."
+                    f"{stage.capitalize()} task {task['task_id']} "
+                    "generated no changes."
                 )
 
             files = await developer.apply_changes(output, filesystem)
@@ -162,6 +208,7 @@ Address this feedback while preserving existing functionality.
 
             updated_tree = build_repo_tree(state["workspace"])
 
+            # Later tasks in this stage see the earlier tasks' results.
             state = {
                 **state,
                 "working_file_contents": updated_contents,
@@ -173,216 +220,30 @@ Address this feedback while preserving existing functionality.
             "working_repo_tree": updated_tree,
             "working_file_contents": updated_contents,
             "stage_summary": state.get("stage_summary", []) + summaries,
-            "developer_stage": "backend_completed",
-            "status": "backend_completed"
+            "developer_stage": f"{stage}_completed",
+            "status": f"{stage}_completed"
         }
 
     finally:
         await filesystem.disconnect()
+
+
+async def backend_stage_node(state: CodeCrewState) -> dict:
+    return await run_developer_stage(
+        state, "backend", "backend_developer", BackendDeveloper
+    )
 
 
 async def database_stage_node(state: CodeCrewState) -> dict:
-    tasks = [
-        task for task in state.get("tasks", [])
-        if task["assigned_developer"] == "database_developer"
-    ]
-
-    if not tasks:
-        return {
-            "developer_stage": "database_skipped",
-            "status": "database_skipped"
-        }
-
-    filesystem = FilesystemClient(workspace=state["workspace"])
-    await filesystem.connect()
-
-    applied_files = list(state.get("applied_files", []))
-    summaries = []
-
-    try:
-        developer = DatabaseDeveloper()
-
-        for task in tasks:
-            task_file_contents = await get_task_file_contents(
-                task,
-                filesystem,
-                state["workspace"]
-            )
-
-            task_text = f"""
-{task}
-
-HUMAN REVIEW FEEDBACK:
-{state.get("approval_feedback", "")}
-
-Address this feedback while preserving existing functionality.
-"""
-            repo_tree = state.get("working_repo_tree") or state.get("repo_tree", "")
-
-            log_developer_input(
-                "database",
-                task,
-                task_text,
-                repo_tree,
-                task_file_contents
-            )
-
-            output = await developer.generate_changes(
-                task=task_text,
-                repo_tree=repo_tree,
-                file_contents=task_file_contents
-            )
-
-            if output.questions:
-                raise RuntimeError(
-                    f"Database task {task['task_id']} has blockers: {output.questions}"
-                )
-
-            if not output.changes:
-                raise RuntimeError(
-                    f"Database task {task['task_id']} generated no changes."
-                )
-
-            files = await developer.apply_changes(output, filesystem)
-
-            applied_files.extend(files)
-            summaries.append(output.summary)
-
-            read_paths = get_safe_paths(
-                list(dict.fromkeys(
-                    applied_files
-                    + task.get("files_to_read", [])
-                    + task.get("files_to_modify", [])
-                )),
-                state["workspace"]
-            )
-
-            updated_contents = (
-                await filesystem.read_multiple_files(read_paths)
-                if read_paths else state.get("working_file_contents", "")
-            )
-
-            updated_tree = build_repo_tree(state["workspace"])
-
-            state = {
-                **state,
-                "working_file_contents": updated_contents,
-                "working_repo_tree": updated_tree
-            }
-
-        return {
-            "applied_files": list(dict.fromkeys(applied_files)),
-            "working_repo_tree": updated_tree,
-            "working_file_contents": updated_contents,
-            "stage_summary": state.get("stage_summary", []) + summaries,
-            "developer_stage": "database_completed",
-            "status": "database_completed"
-        }
-
-    finally:
-        await filesystem.disconnect()
+    return await run_developer_stage(
+        state, "database", "database_developer", DatabaseDeveloper
+    )
 
 
 async def frontend_stage_node(state: CodeCrewState) -> dict:
-    tasks = [
-        task for task in state.get("tasks", [])
-        if task["assigned_developer"] == "frontend_developer"
-    ]
-
-    if not tasks:
-        return {
-            "developer_stage": "frontend_skipped",
-            "status": "frontend_skipped"
-        }
-
-    filesystem = FilesystemClient(workspace=state["workspace"])
-    await filesystem.connect()
-
-    applied_files = list(state.get("applied_files", []))
-    summaries = []
-
-    try:
-        developer = FrontendDeveloper()
-
-        for task in tasks:
-            task_file_contents = await get_task_file_contents(
-                task,
-                filesystem,
-                state["workspace"]
-            )
-
-            task_text = f"""
-{task}
-
-HUMAN REVIEW FEEDBACK:
-{state.get("approval_feedback", "")}
-
-Address this feedback while preserving existing functionality.
-"""
-            repo_tree = state.get("working_repo_tree") or state.get("repo_tree", "")
-
-            log_developer_input(
-                "frontend",
-                task,
-                task_text,
-                repo_tree,
-                task_file_contents
-            )
-
-            output = await developer.generate_changes(
-                task=task_text,
-                repo_tree=repo_tree,
-                file_contents=task_file_contents
-            )
-
-            if output.questions:
-                raise RuntimeError(
-                    f"Frontend task {task['task_id']} has blockers: {output.questions}"
-                )
-
-            if not output.changes:
-                raise RuntimeError(
-                    f"Frontend task {task['task_id']} generated no changes."
-                )
-
-            files = await developer.apply_changes(output, filesystem)
-
-            applied_files.extend(files)
-            summaries.append(output.summary)
-
-            read_paths = get_safe_paths(
-                list(dict.fromkeys(
-                    applied_files
-                    + task.get("files_to_read", [])
-                    + task.get("files_to_modify", [])
-                )),
-                state["workspace"]
-            )
-
-            updated_contents = (
-                await filesystem.read_multiple_files(read_paths)
-                if read_paths else state.get("working_file_contents", "")
-            )
-
-            updated_tree = build_repo_tree(state["workspace"])
-
-            state = {
-                **state,
-                "working_file_contents": updated_contents,
-                "working_repo_tree": updated_tree
-            }
-
-        return {
-            "applied_files": list(dict.fromkeys(applied_files)),
-            "working_repo_tree": updated_tree,
-            "working_file_contents": updated_contents,
-            "stage_summary": state.get("stage_summary", []) + summaries,
-            "developer_stage": "frontend_completed",
-            "status": "frontend_completed"
-        }
-
-    finally:
-        await filesystem.disconnect()
+    return await run_developer_stage(
+        state, "frontend", "frontend_developer", FrontendDeveloper
+    )
 
 
 def initialize_developer_state(state: CodeCrewState) -> dict:
@@ -408,9 +269,16 @@ def finalize_development_node(state: CodeCrewState) -> dict:
     stage_summary = state.get("stage_summary") or []
     applied_files = state.get("applied_files") or []
 
+    # Count this development pass. route_after_testing compares
+    # retry_count with max_attempts; without this the counter stayed at 0
+    # and a failing test run sent the workflow back to the developers
+    # forever.
+    attempt = state.get("retry_count", 0) + 1
+
     return {
         "developer_stage": "completed",
         "status": "testing",
+        "retry_count": attempt,
         "implementation_summary": "\n".join(stage_summary),
         "applied_files": applied_files,
         "approval_feedback": ""

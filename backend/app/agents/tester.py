@@ -6,6 +6,7 @@ from typing import List
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from backend.app.llm import get_groq_llm
+from backend.app.utils.text import clamp_text
 
 load_dotenv()
 
@@ -66,6 +67,16 @@ class TesterAgent:
         test_output: str,
         exit_code: int
     ) -> TesterOutput:
+
+        # Keep the prompt inside the Groq token budget. pytest prints its
+        # failure summary last, so keep the tail of the output.
+        task = clamp_text(task, 1_500, "tester task")
+        implementation_summary = clamp_text(
+            implementation_summary, 1_500, "implementation summary"
+        )
+        test_output = clamp_text(
+            test_output, 8_000, "test output", keep="tail"
+        )
 
         prompt = f"""
 You are the Tester Agent of CodeCrew.

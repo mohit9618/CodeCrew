@@ -1,4 +1,5 @@
 
+import sys
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
@@ -11,15 +12,22 @@ class FilesystemClient:
         self.session = None
         self.exit_stack = AsyncExitStack()
 
+        npx_args = [
+            "npx",
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            workspace
+        ]
+
+        # On Windows npx is a .cmd shim and must be started through cmd.
+        if sys.platform == "win32":
+            command, args = "cmd", ["/c", *npx_args]
+        else:
+            command, args = npx_args[0], npx_args[1:]
+
         self.server_params = StdioServerParameters(
-            command="cmd",
-            args=[
-                "/c",
-                "npx",
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                workspace
-            ]
+            command=command,
+            args=args
         )
 
     async def connect(self):

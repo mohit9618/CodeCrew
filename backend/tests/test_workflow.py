@@ -5,7 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backend.app.graph.workflow import app
+from langgraph.checkpoint.memory import InMemorySaver
+
+from backend.app.graph.workflow import compile_workflow
 from backend.app.mcp.clients.filesystem import FilesystemClient
 
 
@@ -46,7 +48,15 @@ async def main():
 
     print("\nStarting CodeCrew LangGraph workflow...\n")
 
-    result = await app.ainvoke(initial_state)
+    app = compile_workflow(InMemorySaver())
+
+    result = await app.ainvoke(
+        initial_state,
+        {
+            "configurable": {"thread_id": "manual-test"},
+            "recursion_limit": 100
+        }
+    )
 
     print("\nFINAL WORKFLOW RESULT")
     print("Status:", result.get("status"))

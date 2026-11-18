@@ -1,6 +1,12 @@
 
 from langgraph.graph.state import CompiledStateGraph
 
+# Worst case: 3 revisions x (architect + 3 x (developer + tester) +
+# reviewer + approval) plus the intake steps is above LangGraph's default
+# of 25 steps. The retry counters bound the loop, this only has to be
+# higher than the legitimate maximum.
+RECURSION_LIMIT = 100
+
 
 async def run_workflow(
     workflow: CompiledStateGraph,
@@ -10,7 +16,8 @@ async def run_workflow(
     config = {
         "configurable": {
             "thread_id": run_id
-        }
+        },
+        "recursion_limit": RECURSION_LIMIT
     }
 
     result = await workflow.ainvoke(
@@ -32,7 +39,8 @@ async def resume_workflow(
     config = {
         "configurable": {
             "thread_id": run_id
-        }
+        },
+        "recursion_limit": RECURSION_LIMIT
     }
 
     result = await workflow.ainvoke(

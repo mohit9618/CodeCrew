@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Unit tests only. Tests that need Groq, PostgreSQL, Docker or the
+      # network are marked "integration" and skipped by default.
+      - name: Run tests
+        run: pytest
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/codecrew
+          GROQ_API_KEY: test-key

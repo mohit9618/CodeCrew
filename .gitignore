@@ -1,4 +1,20 @@
+# secrets / local config
 .env
 docker-compose.yml
-venv
-__pycache__
+
+# python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# CodeCrew run workspaces (cloned target repositories)
+workspace/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
