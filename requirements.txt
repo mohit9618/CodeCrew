@@ -1,11 +1,21 @@
-
+# core
 langgraph
 langchain
 langchain-groq
+groq
 fastmcp
+mcp
 python-dotenv
 pydantic
-pytest
-mcp
+
+# API server
+fastapi
+uvicorn[standard]
+
+# checkpointing (PostgreSQL)
 langgraph-checkpoint-postgres
 psycopg[binary,pool]
+
+# tests
+pytest
+pytest-asyncio

@@ -143,12 +143,25 @@ async def tester_node(state: dict) -> dict:
         exit_code=execution["exit_code"]
     )
 
+    # pytest's exit code is the source of truth. The LLM analysis is only
+    # a summary: if it fails to parse or is cut short it reports
+    # "needs_attention", and requiring "passed" from it made a green test
+    # run count as a failure and sent the workflow around the retry loop.
     passed = (
         execution["exit_code"] == 0
         and not execution["timed_out"]
-        and analysis.overall_status == "passed"
         and analysis.failed_count == 0
     )
+
+    print(
+        f"\n[Tester] exit_code={execution['exit_code']} "
+        f"timed_out={execution['timed_out']} "
+        f"-> {'PASSED' if passed else 'FAILED'}"
+    )
+
+    if not passed:
+        print("[Tester] last lines of test output:")
+        print("\n".join(test_output.strip().splitlines()[-15:]))
 
     last_error = ""
 

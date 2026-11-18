@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field , AliasChoices
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from backend.app.llm import get_groq_llm
+from backend.app.utils.text import clamp_text
 
 load_dotenv()
 
@@ -59,6 +60,18 @@ class ReviewerAgent:
         file_contents: str,
         test_report: dict
     ) -> ReviewerOutput:
+
+        # Keep the prompt inside the Groq token budget (about 7,000 tokens
+        # including the reserved output).
+        request = clamp_text(request, 1_500, "request")
+        project_spec = clamp_text(project_spec, 3_000, "project specification")
+        tasks = clamp_text(tasks, 3_000, "tasks")
+        implementation_summary = clamp_text(
+            implementation_summary, 1_500, "implementation summary"
+        )
+        applied_files = clamp_text(applied_files, 600, "applied files")
+        file_contents = clamp_text(file_contents, 6_000, "file contents")
+        test_report = clamp_text(test_report, 1_500, "test report")
 
         prompt = f"""
 You are a senior software engineer reviewing changes

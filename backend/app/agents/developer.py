@@ -2,9 +2,11 @@ from pathlib import Path, PurePosixPath
 from typing import List
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from langchain_core.exceptions import OutputParserException
+from pydantic import BaseModel, Field, ValidationError
 
 from backend.app.llm import get_groq_llm
+from backend.app.utils.text import clamp_text
 
 
 load_dotenv()
@@ -25,24 +27,28 @@ class DeveloperOutput(BaseModel):
     )
 
 
-# Prompt-part caps (characters), sized to stay under the 7,000-token budget.
-MAX_TASK_CHARS = 3_000
+# Prompt-part caps (characters). Sized so the system prompt, these three
+# parts and the 2,500 reserved output tokens stay under the default
+# 7,000-token safe TPM budget (estimate is roughly chars // 4).
+MAX_TASK_CHARS = 3_500
 MAX_TREE_CHARS = 4_000
 MAX_FILE_CONTENT_CHARS = 6_000
 
+# The model sometimes returns truncated or invalid JSON for large files.
+# Retry a limited number of times instead of failing the whole run.
+MAX_FORMAT_RETRIES = 1
 
-def clamp_text(text: str, limit: int, label: str) -> str:
-    text = text or ""
 
-    if len(text) <= limit:
-        return text
+def is_format_error(error: Exception) -> bool:
+    if isinstance(error, (OutputParserException, ValidationError)):
+        return True
 
-    print(
-        f"[Developer] {label} truncated from {len(text):,} "
-        f"to {limit:,} characters to fit the token budget."
+    # Groq answers HTTP 400 "json_validate_failed" when the model cannot
+    # produce valid JSON.
+    return (
+        type(error).__name__ == "BadRequestError"
+        and "json" in str(error).lower()
     )
-
-    return text[:limit] + f"\n... ({label} truncated)"
 
 
 class DeveloperAgent:
@@ -68,7 +74,7 @@ class DeveloperAgent:
             MAX_FILE_CONTENT_CHARS,
             "file contents"
         )
-        
+
         messages = [
             (
                 "system",
@@ -130,7 +136,31 @@ Implement only this task. Return complete updated file contents."""
             )
         ]
 
-        return await self.structured_llm.ainvoke(messages)
+        for attempt in range(MAX_FORMAT_RETRIES + 1):
+            try:
+                return await self.structured_llm.ainvoke(messages)
+
+            except Exception as error:
+                if (
+                    not is_format_error(error)
+                    or attempt == MAX_FORMAT_RETRIES
+                ):
+                    raise
+
+                print(
+                    "[Developer] Invalid or truncated JSON from the model; "
+                    f"retrying ({attempt + 1}/{MAX_FORMAT_RETRIES})."
+                )
+
+                messages = messages + [
+                    (
+                        "human",
+                        "Your previous reply was not valid JSON or was cut "
+                        "off. Reply again with ONE complete, valid JSON "
+                        "object. Change only the files the task requires "
+                        "and keep file contents as short as possible."
+                    )
+                ]
 
     async def apply_changes(self, output: DeveloperOutput, filesystem):
         if output.questions:

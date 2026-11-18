@@ -15,6 +15,14 @@ def build_repo_tree(
     workspace: str,
     max_chars: int = DEFAULT_MAX_TREE_CHARS
 ) -> str:
+    """Return a compact, filtered directory tree for LLM prompts.
+
+    Uses the same ignore rules and the same indented text format as
+    RepositoryAnalyzer.inspect_repository, so the tree stays small and
+    consistent between the first and later developer tasks. This replaces
+    the MCP `directory_tree` tool, which returns verbose, unfiltered JSON
+    (including .git, node_modules, venvs, ...).
+    """
     root = Path(workspace).resolve()
 
     if not root.is_dir():

@@ -15,12 +15,45 @@ class GroqRateLimiter:
     def __init__(
         self,
         tpm_limit: int = 8000,
-        safety_margin: int = 1000
+        safety_margin: int = 1000,
+        tpd_limit: int = 0
     ):
         self.tpm_limit = tpm_limit
         self.max_budget = tpm_limit - safety_margin
         self.requests = deque()
         self.lock = asyncio.Lock()
+
+        # Optional tokens-per-day tracking (Groq's free tier allows
+        # 200,000 for gpt-oss-120b). Estimates only; 0 disables it.
+        self.tpd_limit = tpd_limit
+        self.daily_requests = deque()
+        self._daily_warned = False
+
+    def record_daily_usage(self, token_estimate: int):
+        if not self.tpd_limit:
+            return
+
+        now = time.time()
+
+        while (
+            self.daily_requests
+            and now - self.daily_requests[0][0] >= 86_400
+        ):
+            self.daily_requests.popleft()
+
+        self.daily_requests.append((now, token_estimate))
+
+        used = sum(tokens for _, tokens in self.daily_requests)
+
+        if used >= self.tpd_limit * 0.8 and not self._daily_warned:
+            self._daily_warned = True
+            print(
+                f"[Groq Rate Limiter] WARNING: about {used:,} of "
+                f"{self.tpd_limit:,} daily tokens used (estimate). "
+                "Further calls may fail with a daily-limit 429."
+            )
+        elif used < self.tpd_limit * 0.8:
+            self._daily_warned = False
 
     async def acquire(self, token_estimate: int):
         if token_estimate > self.max_budget:
@@ -50,6 +83,7 @@ class GroqRateLimiter:
                     self.requests.append(
                         (curr_time, token_estimate)
                     )
+                    self.record_daily_usage(token_estimate)
                     return
 
                 oldest_time = self.requests[0][0]
@@ -72,6 +106,7 @@ class SharedGroqClient(ChatGroq):
     _rate_limiter: GroqRateLimiter = PrivateAttr()
     _reserved_output_tokens: int = PrivateAttr()
     _max_retries: int = PrivateAttr()
+    _max_retry_wait: float = PrivateAttr()
 
     def __init__(self, limiter: GroqRateLimiter, **kwargs):
         output_tokens = kwargs.get("max_tokens")
@@ -86,6 +121,9 @@ class SharedGroqClient(ChatGroq):
         self._reserved_output_tokens = int(output_tokens)
         self._max_retries = int(
             os.getenv("GROQ_MAX_RETRIES", "4")
+        )
+        self._max_retry_wait = float(
+            os.getenv("GROQ_MAX_RETRY_WAIT", "120")
         )
 
     def estimate_tokens(self, input_data) -> int:
@@ -127,6 +165,19 @@ class SharedGroqClient(ChatGroq):
 
                 wait_time = self.get_retry_delay(error, attempt)
 
+                # A short retry-after is a per-minute limit: wait it out.
+                # A long one (minutes to hours) means the daily token
+                # limit is used up. Sleeping that long would just hang
+                # the run, so fail with a clear message instead.
+                if wait_time > self._max_retry_wait:
+                    raise RuntimeError(
+                        f"Groq asked to wait {wait_time:.0f}s before the "
+                        "next request, which usually means the daily token "
+                        "limit is exhausted. Try again later, use a model "
+                        "or key with a higher limit, or lower "
+                        "GROQ_TPM_LIMIT / prompt sizes."
+                    ) from error
+
                 print(
                     f"[Groq 429] Retrying in {wait_time:.1f}s "
                     f"({attempt + 1}/{self._max_retries})"
@@ -138,9 +189,12 @@ class SharedGroqClient(ChatGroq):
 _tpm_limit = int(os.getenv("GROQ_TPM_LIMIT", "8000"))
 _safety_margin = int(os.getenv("GROQ_TPM_SAFETY_MARGIN", "1000"))
 
+_tpd_limit = int(os.getenv("GROQ_TPD_LIMIT", "200000"))
+
 _shared_limiter = GroqRateLimiter(
     tpm_limit=_tpm_limit,
-    safety_margin=_safety_margin
+    safety_margin=_safety_margin,
+    tpd_limit=_tpd_limit
 )
 
 _shared_clients = {}

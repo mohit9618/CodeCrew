@@ -34,4 +34,14 @@ def human_approval_node(state: dict) -> dict:
         "revision_count": state.get("revision_count", 0) + (
             1 if action == "request_changes" else 0
         ),
+        # A requested revision starts with a fresh retry budget and no
+        # leftover failure from the previous round.
+        "retry_count": (
+            0 if action == "request_changes"
+            else state.get("retry_count", 0)
+        ),
+        "last_error": (
+            "" if action == "request_changes"
+            else state.get("last_error", "")
+        ),
     }

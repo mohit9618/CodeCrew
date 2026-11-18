@@ -1,6 +1,8 @@
 import asyncio
 from uuid import uuid4
 
+import pytest
+
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
@@ -10,7 +12,7 @@ from backend.app.graph.approval import human_approval_node
 from backend.app.graph.routing import route_after_approval
 
 
-async def test_decision(decision, initial_count, expected_status, expected_route):
+async def check_decision(decision, initial_count, expected_status, expected_route):
     graph = StateGraph(CodeCrewState)
 
     graph.add_node("approval", human_approval_node)
@@ -57,20 +59,37 @@ async def test_decision(decision, initial_count, expected_status, expected_route
     print(f"{decision}: PASSED -> {route}")
 
 
+@pytest.mark.parametrize(
+    "decision, initial_count, expected_status, expected_route",
+    [
+        ("approve", 0, "approve", "approved"),
+        ("request_changes", 0, "request_changes", "changes_requested"),
+        ("reject", 0, "reject", "rejected"),
+        ("request_changes", 2, "request_changes", "revision_limit_reached"),
+    ]
+)
+async def test_approval_routing(
+    decision, initial_count, expected_status, expected_route
+):
+    await check_decision(
+        decision, initial_count, expected_status, expected_route
+    )
+
+
 async def main():
-    await test_decision(
+    await check_decision(
         "approve", 0, "approve", "approved"
     )
 
-    await test_decision(
+    await check_decision(
         "request_changes", 0, "request_changes", "changes_requested"
     )
 
-    await test_decision(
+    await check_decision(
         "reject", 0, "reject", "rejected"
     )
 
-    await test_decision(
+    await check_decision(
         "request_changes", 2, "request_changes", "revision_limit_reached"
     )
 
