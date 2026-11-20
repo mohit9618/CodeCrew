@@ -1,9 +1,20 @@
 """Publish approved changes: branch, commit, push and open a pull request.
 
-Runs only after a human approved the result. Needs a GitHub token with
-write access to the repository (GITHUB_TOKEN). When the token is missing
-or the push is refused, the changes stay in the workspace and the reason is
-reported; nothing here raises into the workflow.
+Runs only after a human approved the result. Needs a GitHub token
+(GITHUB_TOKEN). Where the branch is pushed depends on what the token may do
+with the project's repository:
+
+* write access (your own repository, or you are a collaborator):
+  the branch is pushed to the repository itself;
+* no write access (someone else's project): the repository is forked into
+  the token's account, the branch is pushed to the fork, and a pull request
+  is opened from the fork against the original. The owner can review it and
+  merge it if they want to.
+
+CODECREW_PUBLISH_MODE can force `direct` or `fork`; the default is `auto`.
+
+When the token is missing or publishing fails, the changes stay in the
+workspace and the reason is reported; nothing here raises into the workflow.
 
 The token is passed to git through environment variables, never on the
 command line, so it does not show up in process lists or logs.
@@ -13,6 +24,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -22,6 +34,14 @@ from backend.app.utils.paths import safe_relative_path
 GIT_TIMEOUT = 120
 API_TIMEOUT = 30
 GITHUB_API = "https://api.github.com"
+
+# A fork is created asynchronously by GitHub; wait for it to become usable.
+FORK_POLL_ATTEMPTS = 20
+FORK_POLL_SECONDS = 3
+FORK_PUSH_ATTEMPTS = 3
+FORK_REMOTE = "codecrew-fork"
+
+PUBLISH_MODES = ("auto", "direct", "fork")
 
 DEFAULT_GIT_NAME = "CodeCrew"
 DEFAULT_GIT_EMAIL = "codecrew@users.noreply.github.com"
@@ -180,36 +200,175 @@ def build_pull_request_body(state: dict) -> str:
     return "\n\n".join(sections)
 
 
-def _open_pull_request(
-    owner: str, repo: str, token: str,
-    title: str, body: str, head: str, base: str,
-) -> str:
+def _github_api(token: str, method: str, path: str, payload=None):
+    """Call the GitHub REST API. Returns (status code, parsed JSON).
+
+    HTTP error statuses are returned, not raised, so callers can react to
+    404/403/422. Only network problems raise.
+    """
     request = urllib.request.Request(
-        f"{GITHUB_API}/repos/{owner}/{repo}/pulls",
-        data=json.dumps({
-            "title": title, "head": head, "base": base, "body": body,
-        }).encode(),
+        f"{GITHUB_API}{path}",
+        data=None if payload is None else json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
             "User-Agent": "CodeCrew",
         },
-        method="POST",
+        method=method,
     )
 
     try:
         with urllib.request.urlopen(request, timeout=API_TIMEOUT) as response:
-            return json.loads(response.read())["html_url"]
+            raw = response.read()
+            return response.status, (json.loads(raw) if raw else {})
 
     except urllib.error.HTTPError as error:
-        detail = _redact(error.read().decode(errors="replace"), token)
-        raise PublishError(
-            f"GitHub refused the pull request ({error.code}): {detail[:500]}"
-        )
+        raw = error.read().decode(errors="replace")
+
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = {"message": raw}
+
+        return error.code, data if isinstance(data, dict) else {}
 
     except (urllib.error.URLError, OSError) as error:
         raise PublishError(f"Could not reach GitHub: {error}")
+
+
+def _api_message(data: dict, token: str) -> str:
+    message = data.get("message", "")
+    details = "; ".join(
+        str(item.get("message", item)) if isinstance(item, dict) else str(item)
+        for item in data.get("errors", []) or []
+    )
+
+    return _redact(f"{message} {details}".strip(), token)[:500]
+
+
+def _repo_access(owner: str, repo: str, token: str) -> dict:
+    """What the token may do with the repository."""
+    status, data = _github_api(token, "GET", f"/repos/{owner}/{repo}")
+
+    if status == 404:
+        raise PublishError(
+            f"Repository {owner}/{repo} was not found, or the token cannot "
+            "see it (a private repository needs a token with access to it)."
+        )
+
+    if status != 200:
+        raise PublishError(
+            f"Could not read {owner}/{repo} ({status}): "
+            f"{_api_message(data, token)}"
+        )
+
+    if data.get("archived"):
+        raise PublishError(f"{owner}/{repo} is archived and read-only.")
+
+    return {
+        "can_push": bool((data.get("permissions") or {}).get("push")),
+        "allow_forking": data.get("allow_forking", True),
+    }
+
+
+def _ensure_fork(owner: str, repo: str, token: str) -> tuple[str, str]:
+    """Fork owner/repo into the token's account; return (owner, name).
+
+    If the account already has a fork, GitHub returns it. Forking is
+    asynchronous, so wait until the fork can be read.
+    """
+    status, data = _github_api(
+        token, "POST", f"/repos/{owner}/{repo}/forks", {}
+    )
+
+    if status not in (200, 201, 202):
+        raise PublishError(
+            f"Could not fork {owner}/{repo} ({status}): "
+            f"{_api_message(data, token)} The token must be allowed to "
+            "create forks (a classic token with the `public_repo` scope, "
+            "or `repo` for private repositories)."
+        )
+
+    fork_owner = data["owner"]["login"]
+    fork_repo = data["name"]
+
+    if fork_owner.lower() == owner.lower():
+        raise PublishError(
+            f"The token belongs to the owner of {owner}/{repo}, so it cannot "
+            "be forked. Use CODECREW_PUBLISH_MODE=direct."
+        )
+
+    for _ in range(FORK_POLL_ATTEMPTS):
+        ready, _ = _github_api(
+            token, "GET", f"/repos/{fork_owner}/{fork_repo}"
+        )
+
+        if ready == 200:
+            return fork_owner, fork_repo
+
+        time.sleep(FORK_POLL_SECONDS)
+
+    raise PublishError(
+        f"The fork {fork_owner}/{fork_repo} was created but is not ready "
+        "yet. Publish again in a minute."
+    )
+
+
+def _fork_remote_url(fork_owner: str, fork_repo: str) -> str:
+    return f"https://github.com/{fork_owner}/{fork_repo}.git"
+
+
+def _push_to_fork(workspace: str, url: str, branch: str, token: str) -> None:
+    """Push to the fork, retrying: a fresh fork may not accept pushes at once."""
+    has_remote = _git(
+        workspace, ["remote", "get-url", FORK_REMOTE], check=False
+    ).returncode == 0
+
+    _git(workspace, [
+        "remote", "set-url" if has_remote else "add", FORK_REMOTE, url
+    ])
+
+    last_error = None
+
+    for attempt in range(FORK_PUSH_ATTEMPTS):
+        try:
+            _git(
+                workspace, ["push", "-u", FORK_REMOTE, branch], token=token
+            )
+            return
+        except PublishError as error:
+            last_error = error
+
+            if attempt < FORK_PUSH_ATTEMPTS - 1:
+                time.sleep(FORK_POLL_SECONDS)
+
+    raise last_error
+
+
+def _open_pull_request(
+    owner: str, repo: str, token: str,
+    title: str, body: str, head: str, base: str,
+    maintainer_can_modify: bool = False,
+) -> str:
+    """Open the PR on owner/repo. `head` is `branch` or `fork_owner:branch`."""
+    status, data = _github_api(
+        token, "POST", f"/repos/{owner}/{repo}/pulls", {
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": body,
+            "maintainer_can_modify": maintainer_can_modify,
+        },
+    )
+
+    if status not in (200, 201):
+        raise PublishError(
+            f"GitHub refused the pull request ({status}): "
+            f"{_api_message(data, token)}"
+        )
+
+    return data["html_url"]
 
 
 def publish_changes(
@@ -219,14 +378,29 @@ def publish_changes(
     body: str,
     branch: str,
     token: str,
+    mode: str | None = None,
 ) -> dict:
     """Commit `applied_files` on a new branch, push it, open a PR.
+
+    The PR always targets the repository the workspace was cloned from.
+    `mode` is "direct" (push to that repository), "fork" (push to a fork
+    and open a cross-repository PR) or "auto" (direct when the token has
+    write access, otherwise fork). Defaults to CODECREW_PUBLISH_MODE, then
+    "auto".
 
     Only the files agents actually changed are committed, so CodeCrew's own
     working files (virtualenv, caches) never end up in the commit.
     """
     if not token:
         raise PublishError("GITHUB_TOKEN is not set.")
+
+    mode = (mode or os.getenv("CODECREW_PUBLISH_MODE") or "auto").lower()
+
+    if mode not in PUBLISH_MODES:
+        raise PublishError(
+            f"CODECREW_PUBLISH_MODE must be one of {PUBLISH_MODES}, "
+            f"not {mode!r}."
+        )
 
     files = []
 
@@ -241,6 +415,17 @@ def publish_changes(
 
     remote = _git(workspace, ["remote", "get-url", "origin"]).stdout
     owner, repo = parse_github_repo(remote)
+
+    # Ask GitHub first: it is cheap and fails fast on a wrong repository or
+    # token, before anything is committed.
+    access = _repo_access(owner, repo, token)
+    use_fork = mode == "fork" or (mode == "auto" and not access["can_push"])
+
+    if use_fork and not access["allow_forking"]:
+        raise PublishError(
+            f"{owner}/{repo} does not allow forking, and the token has no "
+            "write access to it, so a pull request cannot be opened."
+        )
 
     base = _base_branch(workspace)
     branch = _free_branch_name(workspace, branch)
@@ -261,14 +446,38 @@ def publish_changes(
         "commit", "-m", title, "-m", body,
     ])
 
-    try:
-        _git(workspace, ["push", "-u", "origin", branch], token=token)
-    except PublishError as error:
-        raise PublishError(
-            f"{error} (If you do not have push access to {owner}/{repo}, "
-            "fork it and run CodeCrew on your fork.)"
+    if use_fork:
+        fork_owner, fork_repo = _ensure_fork(owner, repo, token)
+
+        _push_to_fork(
+            workspace, _fork_remote_url(fork_owner, fork_repo), branch, token
         )
 
-    pr_url = _open_pull_request(owner, repo, token, title, body, branch, base)
+        head = f"{fork_owner}:{branch}"
 
-    return {"branch": branch, "pr_url": pr_url, "base": base, "files": files}
+    else:
+        try:
+            _git(workspace, ["push", "-u", "origin", branch], token=token)
+        except PublishError as error:
+            raise PublishError(
+                f"{error} (Check that the token may write to {owner}/{repo}. "
+                "Set CODECREW_PUBLISH_MODE=fork to publish through a fork "
+                "instead.)"
+            )
+
+        head = branch
+
+    pr_url = _open_pull_request(
+        owner, repo, token, title, body, head, base,
+        maintainer_can_modify=use_fork,
+    )
+
+    return {
+        "branch": branch,
+        "pr_url": pr_url,
+        "base": base,
+        "files": files,
+        "mode": "fork" if use_fork else "direct",
+        "head": head,
+        "target": f"{owner}/{repo}",
+    }

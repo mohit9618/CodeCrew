@@ -233,5 +233,6 @@ async def publisher_node(state: dict) -> dict:
         "publish_status": "published",
         "publish_error": "",
         "branch_name": result["branch"],
+        "publish_mode": result["mode"],
         "pr_url": result["pr_url"],
     }

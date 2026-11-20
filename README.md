@@ -33,8 +33,10 @@ intake -> project manager -> architect -> developers -> tester -> reviewer -> hu
 - **Reviewer** reviews the change; a human approves, rejects or requests
   changes (up to `max_revisions`, 2).
 - **Publisher** (`services/publisher.py`) runs after approval: it commits only
-  the files the agents changed to a new branch, pushes it and opens a pull
-  request.
+  the files the agents changed to a new branch and opens a pull request on the
+  project's repository. If your token cannot write to that repository, it
+  forks it, pushes to the fork and opens the PR from there, so the owner can
+  review and merge it.
 - Run state is checkpointed in PostgreSQL so a run can pause for approval and
   resume.
 
@@ -109,7 +111,8 @@ uvicorn backend.app.main:app --reload
 | `POST` | `/runs/{run_id}/resume` | Answer the approval step: `{"decision": "approve" \| "request_changes" \| "reject", "feedback": "..."}` |
 
 After an approval the state contains `publish_status` (`published`,
-`skipped` or `failed`), `pr_url` and `publish_error`.
+`skipped` or `failed`), `publish_mode` (`direct` or `fork`), `pr_url` and
+`publish_error`.
 
 ## Models and Groq limits
 
@@ -142,12 +145,33 @@ the output budget on hidden thinking, which truncates long JSON answers.
 
 ## Publishing
 
-Set `GITHUB_TOKEN` (a token with write access to the repository; a
-fine-grained token needs "Contents" and "Pull requests" write permission).
-Optionally set `CODECREW_GIT_NAME` and `CODECREW_GIT_EMAIL` for the commit
-author. If you do not have push access to the repository you run CodeCrew on,
-fork it first. Without a token the run still completes and the changes stay in
-the run's workspace.
+The pull request always targets the repository the run cloned. Where the
+branch is pushed depends on what your `GITHUB_TOKEN` may do there
+(`CODECREW_PUBLISH_MODE`):
+
+| Mode | Behaviour |
+| --- | --- |
+| `auto` (default) | Push to the repository if the token has write access; otherwise fork it, push to the fork and open a cross-repository PR |
+| `direct` | Always push to the repository itself |
+| `fork` | Always publish through a fork (fails if the token belongs to the repository's owner) |
+
+Token requirements:
+
+- **Classic token:** the `public_repo` scope (`repo` for private repositories)
+  covers pushing, forking and opening pull requests.
+- **Fine-grained token:** "Contents" and "Pull requests" write permission are
+  enough for `direct`. Whether a fine-grained token may create forks depends on
+  how it was issued, so prefer a classic token for `fork`/`auto` on other
+  people's projects.
+
+The PR is opened by the token's account. Use a dedicated account if it should
+not appear under your name. Forked PRs allow edits by the repository's
+maintainers. Optionally set `CODECREW_GIT_NAME` and `CODECREW_GIT_EMAIL` for
+the commit author.
+
+Publishing only happens after a human approves the result. Without a token, or
+if publishing fails, the run still completes and the changes stay in the run's
+workspace; the reason is in `publish_error`.
 
 ## Tests
 

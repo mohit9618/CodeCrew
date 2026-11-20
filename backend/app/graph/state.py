@@ -57,4 +57,5 @@ class CodeCrewState(TypedDict, total=False):
     publish_status: str
     publish_error: str
     branch_name: str
+    publish_mode: str  # "direct" or "fork"
     pr_url: str

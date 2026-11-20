@@ -246,7 +246,11 @@ async def test_publisher_records_the_pull_request(monkeypatch):
 
     def fake_publish(workspace, files, title, body, branch, token):
         seen.update(files=files, branch=branch, token=token, title=title)
-        return {"branch": branch, "pr_url": "https://github.com/o/r/pull/1"}
+        return {
+            "branch": branch,
+            "mode": "fork",
+            "pr_url": "https://github.com/o/r/pull/1",
+        }
 
     monkeypatch.setattr(nodes, "publish_changes", fake_publish)
 
@@ -257,6 +261,7 @@ async def test_publisher_records_the_pull_request(monkeypatch):
     })
 
     assert result["status"] == "published"
+    assert result["publish_mode"] == "fork"
     assert result["pr_url"] == "https://github.com/o/r/pull/1"
     assert seen["files"] == ["app/health.py"]
     assert seen["branch"].startswith("codecrew/add-a-health-endpoint-")
