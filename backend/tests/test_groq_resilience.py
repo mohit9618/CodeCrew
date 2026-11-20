@@ -108,9 +108,15 @@ class FlakyStructuredLLM:
         return DeveloperOutput(summary="ok", changes=[])
 
 
+class FakeModel:
+    def prompt_char_budget(self, overhead_tokens=0):
+        return 30_000
+
+
 def make_developer(llm):
     agent = DeveloperAgent.__new__(DeveloperAgent)
     agent.specialization = "backend"
+    agent.llm = FakeModel()
     agent.structured_llm = llm
     return agent
 

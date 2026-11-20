@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from backend.app.agents.repository_analyzer import (
+from backend.app.utils.ignore import (
     IGNORED_DIRS,
     IGNORED_FILES,
     IGNORED_SUFFIXES,

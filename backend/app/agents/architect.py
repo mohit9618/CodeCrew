@@ -3,9 +3,11 @@ import re
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.app.llm import get_groq_llm
+from backend.app.llm.groq_client import CHARS_PER_TOKEN
+from backend.app.utils.text import clamp_text, split_budget
 
 load_dotenv()
 
@@ -37,6 +39,35 @@ class ArchitectureOutput(BaseModel):
     execution_batches: list[list[str]] = Field(default_factory=list)
     integration_considerations: list[str] = Field(default_factory=list)
     architectural_risks: list[str] = Field(default_factory=list)
+    # Shared by every developer so backend, database and frontend fit.
+    api_contract: list[str] = Field(default_factory=list)
+    data_model: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "architecture_summary", "existing_architecture", mode="before"
+    )
+    @classmethod
+    def coerce_text_field(cls, value):
+        """Models sometimes return a list of sentences for a text field."""
+        if value is None:
+            return ""
+
+        if isinstance(value, list):
+            return "\n".join(str(item) for item in value)
+
+        return value
+
+
+# Share of the prompt space each dynamic part may use (see split_budget).
+PART_WEIGHTS = {
+    "project": 0.20,
+    "analysis": 0.08,
+    "tree": 0.20,
+    "files": 0.42,
+    "feedback": 0.10,
+}
+PROMPT_SAFETY = 0.85
+MIN_PROMPT_CHARS = 2_000
 
 
 def normalize_list_field(value):
@@ -65,7 +96,7 @@ def normalize_list_field(value):
 
 class ArchitectAgent:
     def __init__(self):
-        self.llm = get_groq_llm(max_tokens=3000)
+        self.llm = get_groq_llm(max_tokens=3000, role="architect")
 
     async def design_architecture(
         self,
@@ -76,16 +107,17 @@ class ArchitectAgent:
         revision_feedback: str = "",
     ) -> ArchitectureOutput:
 
-        project_context = json.dumps(project_spec, ensure_ascii=False)[:3500]
-        analysis_context = json.dumps(
-            repository_analysis, ensure_ascii=False
-        )[:1200]
+        project_context = json.dumps(project_spec, ensure_ascii=False)
+        analysis_context = json.dumps(repository_analysis, ensure_ascii=False)
 
-        repo_tree = repo_tree[:1000]
-        file_contents = file_contents[:2000]
-        revision_feedback = revision_feedback[:1000]
-
-        prompt = f"""
+        def build_prompt(
+            project_context,
+            analysis_context,
+            repo_tree,
+            file_contents,
+            revision_feedback,
+        ):
+            return f"""
 You are the Architect Agent of CodeCrew, a general-purpose AI software
 engineering team. Understand the repository, plan the required changes,
 and decompose the request into developer tasks.
@@ -113,6 +145,18 @@ YOUR RESPONSIBILITIES:
 5. Define dependencies, execution batches and integration considerations.
 6. Identify actual architectural risks.
 7. Use repository analysis as context, but verify claims against supplied files.
+8. When the work involves an HTTP API, a database, or more than one
+   developer, define the shared contract (see SHARED CONTRACT).
+
+SHARED CONTRACT:
+- api_contract: one string per endpoint, e.g.
+  "POST /items  body {name: str}  ->  201 {id: int, name: str}; 422 on invalid body".
+  Include every endpoint the backend must provide and the frontend will call.
+- data_model: one string per table or entity, e.g.
+  "items(id INTEGER PK, name TEXT NOT NULL UNIQUE, created_at TIMESTAMP)".
+- Developers work separately and see only the contract, so be exact: paths,
+  methods, status codes, field names and types.
+- Use [] for both when the task has no API or database part.
 
 REVISION HANDLING:
 - Treat revision feedback as additional requirements alongside the original
@@ -214,13 +258,16 @@ OUTPUT SCHEMA:
 Return exactly one valid JSON object with:
 architecture_summary, existing_architecture, proposed_changes,
 technology_stack, tasks, execution_batches, integration_considerations,
-architectural_risks.
+architectural_risks, api_contract, data_model.
 
 Every task MUST contain:
 task_id, title, description, domain, assigned_developer,
 files_to_modify, files_to_read, dependencies, acceptance_criteria.
 
 STRICT JSON TYPE REQUIREMENTS:
+- architecture_summary and existing_architecture must be plain strings,
+  not arrays.
+- api_contract and data_model must be arrays of strings.
 - proposed_changes must be an array of strings.
 - technology_stack must be an array of strings.
 - integration_considerations must be an array of strings.
@@ -246,6 +293,37 @@ SECURITY:
 
 Return only the JSON object.
 """
+
+        static_chars = len(build_prompt("", "", "", "", ""))
+
+        available = max(
+            int(
+                self.llm.prompt_char_budget(
+                    overhead_tokens=static_chars // CHARS_PER_TOKEN + 100
+                ) * PROMPT_SAFETY
+            ),
+            MIN_PROMPT_CHARS,
+        )
+
+        limits = split_budget(
+            available,
+            {
+                "project": len(project_context),
+                "analysis": len(analysis_context),
+                "tree": len(repo_tree),
+                "files": len(file_contents),
+                "feedback": len(revision_feedback),
+            },
+            PART_WEIGHTS,
+        )
+
+        prompt = build_prompt(
+            clamp_text(project_context, limits["project"], "project spec"),
+            clamp_text(analysis_context, limits["analysis"], "repo analysis"),
+            clamp_text(repo_tree, limits["tree"], "repository tree"),
+            clamp_text(file_contents, limits["files"], "file contents"),
+            clamp_text(revision_feedback, limits["feedback"], "feedback"),
+        )
 
         response = await self.llm.ainvoke(prompt)
         content = response.content
@@ -295,6 +373,8 @@ Return only the JSON object.
             "technology_stack",
             "integration_considerations",
             "architectural_risks",
+            "api_contract",
+            "data_model",
         ]
 
         for field in list_fields:

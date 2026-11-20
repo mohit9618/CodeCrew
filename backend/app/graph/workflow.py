@@ -6,7 +6,8 @@ from backend.app.graph.nodes import (
     project_manager_node,
     architect_node,
     tester_node,
-    reviewer_node
+    reviewer_node,
+    publisher_node
 )
 from backend.app.graph.developer_subgraph import developer_subgraph
 from backend.app.graph.approval import human_approval_node
@@ -27,6 +28,7 @@ graph.add_node("developer", developer_subgraph)
 graph.add_node("tester", tester_node)
 graph.add_node("reviewer", reviewer_node)
 graph.add_node("human_approval", human_approval_node)
+graph.add_node("publisher", publisher_node)
 
 
 graph.add_edge(START, "intake")
@@ -61,13 +63,16 @@ graph.add_conditional_edges(
     "human_approval",
     route_after_approval,
     {
-        "approved": END,
+        "approved": "publisher",
         "changes_requested": "architect",
         "rejected": END,
         "revision_limit_reached": END,
         END: END
     }
 )
+
+graph.add_edge("publisher", END)
+
 
 def compile_workflow(checkpointer):
     return graph.compile(checkpointer=checkpointer)

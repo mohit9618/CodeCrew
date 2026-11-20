@@ -1,61 +1,56 @@
-from pathlib import Path, PurePosixPath
+"""Development step: the developers carry out the architect's tasks.
 
+Tasks run one after another in the order the architect planned
+(`execution_batches`, which respects task dependencies). Each task goes to
+the developer role it was assigned to; every role works through the same
+change -> check -> fix loop (see agents/developer.py).
+"""
 from langgraph.graph import StateGraph, START, END
 
-from backend.app.graph.state import CodeCrewState
 from backend.app.agents.backend_developer import BackendDeveloper
 from backend.app.agents.database_developer import DatabaseDeveloper
+from backend.app.agents.developer import DeveloperAgent
 from backend.app.agents.frontend_developer import FrontendDeveloper
+from backend.app.graph.state import CodeCrewState
 from backend.app.mcp.clients.filesystem import FilesystemClient
 from backend.app.utils.repo_tree import build_repo_tree
+from backend.app.utils.retrieval import read_files_text
 from backend.app.utils.text import clamp_text
+from sandbox.execution import run_checks
 
 # How much of the previous test failure the developer gets to see.
 # The pytest summary is printed last, so the tail is what matters.
 MAX_LAST_ERROR_CHARS = 1_500
 
+# Characters of changed-file content kept in the state for the reviewer.
+MAX_REVIEW_FILE_CHARS = 12_000
 
-def get_safe_paths(paths: list[str], workspace: str) -> list[str]:
-    safe_paths = []
-    root = Path(workspace).resolve()
-
-    for path in paths:
-        rel_path = PurePosixPath(path.replace("\\", "/"))
-
-        if (
-            rel_path.is_absolute()
-            or ".." in rel_path.parts
-            or not rel_path.parts
-            or ":" in path
-        ):
-            raise ValueError(f"Unsafe repository path: {path}")
-
-        full_path = (root / Path(*rel_path.parts)).resolve()
-        full_path.relative_to(root)
-
-        if str(full_path) not in safe_paths:
-            safe_paths.append(str(full_path))
-
-    return safe_paths
+DEVELOPER_ROLES = {
+    "backend_developer": BackendDeveloper,
+    "database_developer": DatabaseDeveloper,
+    "frontend_developer": FrontendDeveloper,
+}
 
 
-async def get_task_file_contents(task: dict, filesystem, workspace: str) -> str:
-    requested_paths = list(dict.fromkeys(
-        task.get("files_to_read", [])
-        + task.get("files_to_modify", [])
-    ))
+def order_tasks(tasks: list[dict], execution_batches: list[list[str]]) -> list[dict]:
+    """Tasks in execution order.
 
-    safe_paths = get_safe_paths(requested_paths, workspace)
+    Follows `execution_batches`; tasks the batches do not mention (or all
+    tasks, when there are no batches) keep their original order at the end.
+    """
+    by_id = {task["task_id"]: task for task in tasks}
+    ordered = []
 
-    existing_paths = [
-        path for path in safe_paths
-        if Path(path).is_file()
-    ]
+    for batch in execution_batches or []:
+        for task_id in batch:
+            task = by_id.pop(task_id, None)
 
-    if not existing_paths:
-        return ""
+            if task is not None:
+                ordered.append(task)
 
-    return await filesystem.read_multiple_files(existing_paths)
+    ordered.extend(by_id.values())
+
+    return ordered
 
 
 def build_task_text(task: dict, state: dict) -> str:
@@ -95,155 +90,86 @@ def build_task_text(task: dict, state: dict) -> str:
     return "\n\n".join(parts)
 
 
-def log_developer_input(
-    stage: str,
-    task: dict,
-    task_text: str,
-    repo_tree: str,
-    file_contents: str
-) -> None:
-    task_chars = len(task_text)
-    tree_chars = len(repo_tree)
-    file_chars = len(file_contents)
-    total_chars = task_chars + tree_chars + file_chars
-
-    print(f"\n========== {stage.upper()} DEVELOPER INPUT ==========")
-    print(f"Task ID: {task.get('task_id')}")
-    print(f"Task characters: {task_chars:,}")
-    print(f"Repository tree characters: {tree_chars:,}")
-    print(f"File contents characters: {file_chars:,}")
-    print(f"Total input characters: {total_chars:,}")
-    print(f"Rough input token estimate: {total_chars // 4:,}")
-    print("==============================================\n")
+def log_task(task: dict, role: str, task_text: str) -> None:
+    print(
+        f"\n========== {role.upper()}: TASK {task.get('task_id')} "
+        f"- {task.get('title', '')} =========="
+    )
+    print(f"Task characters: {len(task_text):,}")
 
 
-async def run_developer_stage(
-    state: CodeCrewState,
-    stage: str,
-    assigned_developer: str,
-    developer_class
-) -> dict:
-    """Run every task assigned to one developer type, one after another."""
-    tasks = [
-        task for task in state.get("tasks", [])
-        if task["assigned_developer"] == assigned_developer
-    ]
+async def develop_node(state: CodeCrewState) -> dict:
+    tasks = order_tasks(
+        state.get("tasks", []), state.get("execution_batches", [])
+    )
 
     if not tasks:
         return {
-            "developer_stage": f"{stage}_skipped",
-            "status": f"{stage}_skipped"
+            "developer_stage": "skipped",
+            "stage_summary": [],
         }
 
-    filesystem = FilesystemClient(workspace=state["workspace"])
+    workspace = state["workspace"]
+    stack_summary = (state.get("stack") or {}).get("summary", "")
+
+    # A retry after failed tests or review feedback may legitimately need
+    # no further change for some tasks.
+    is_rework = bool(
+        state.get("last_error") or state.get("approval_feedback")
+    )
+
+    filesystem = FilesystemClient(workspace=workspace)
     await filesystem.connect()
 
     applied_files = list(state.get("applied_files", []))
     summaries = []
+    agents: dict[str, DeveloperAgent] = {}
 
     try:
-        developer = developer_class()
-
         for task in tasks:
-            task_file_contents = await get_task_file_contents(
-                task,
-                filesystem,
-                state["workspace"]
-            )
+            role = task["assigned_developer"]
+
+            if role not in agents:
+                agents[role] = DEVELOPER_ROLES.get(role, DeveloperAgent)()
 
             task_text = build_task_text(task, state)
+            log_task(task, role, task_text)
 
-            repo_tree = (
-                state.get("working_repo_tree")
-                or state.get("repo_tree", "")
-            )
-
-            log_developer_input(
-                stage,
+            result = await agents[role].run_task(
                 task,
-                task_text,
-                repo_tree,
-                task_file_contents
+                task_text=task_text,
+                workspace=workspace,
+                filesystem=filesystem,
+                stack_summary=stack_summary,
+                api_contract=state.get("api_contract", []),
+                data_model=state.get("data_model", []),
+                check_runner=run_checks,
+                allow_no_changes=is_rework,
+                applied_before=applied_files,
             )
 
-            output = await developer.generate_changes(
-                task=task_text,
-                repo_tree=repo_tree,
-                file_contents=task_file_contents
-            )
+            for path in result["applied_files"]:
+                if path not in applied_files:
+                    applied_files.append(path)
 
-            if output.questions:
-                raise RuntimeError(
-                    f"{stage.capitalize()} task {task['task_id']} "
-                    f"has blockers: {output.questions}"
-                )
+            if result["summary"]:
+                summaries.append(result["summary"])
 
-            if not output.changes:
-                raise RuntimeError(
-                    f"{stage.capitalize()} task {task['task_id']} "
-                    "generated no changes."
-                )
-
-            files = await developer.apply_changes(output, filesystem)
-
-            applied_files.extend(files)
-            summaries.append(output.summary)
-
-            read_paths = get_safe_paths(
-                list(dict.fromkeys(
-                    applied_files
-                    + task.get("files_to_read", [])
-                    + task.get("files_to_modify", [])
-                )),
-                state["workspace"]
-            )
-
-            updated_contents = (
-                await filesystem.read_multiple_files(read_paths)
-                if read_paths else state.get(
-                    "working_file_contents",
-                    state.get("file_contents", "")
-                )
-            )
-
-            updated_tree = build_repo_tree(state["workspace"])
-
-            # Later tasks in this stage see the earlier tasks' results.
-            state = {
-                **state,
-                "working_file_contents": updated_contents,
-                "working_repo_tree": updated_tree
-            }
-
-        return {
-            "applied_files": list(dict.fromkeys(applied_files)),
-            "working_repo_tree": updated_tree,
-            "working_file_contents": updated_contents,
-            "stage_summary": state.get("stage_summary", []) + summaries,
-            "developer_stage": f"{stage}_completed",
-            "status": f"{stage}_completed"
-        }
+            for warning in result["warnings"]:
+                print(f"[Developer] task {task['task_id']} warning: {warning}")
 
     finally:
         await filesystem.disconnect()
 
-
-async def backend_stage_node(state: CodeCrewState) -> dict:
-    return await run_developer_stage(
-        state, "backend", "backend_developer", BackendDeveloper
-    )
-
-
-async def database_stage_node(state: CodeCrewState) -> dict:
-    return await run_developer_stage(
-        state, "database", "database_developer", DatabaseDeveloper
-    )
-
-
-async def frontend_stage_node(state: CodeCrewState) -> dict:
-    return await run_developer_stage(
-        state, "frontend", "frontend_developer", FrontendDeveloper
-    )
+    return {
+        "applied_files": applied_files,
+        "working_repo_tree": build_repo_tree(workspace),
+        "working_file_contents": read_files_text(
+            workspace, applied_files, MAX_REVIEW_FILE_CHARS
+        ),
+        "stage_summary": summaries,
+        "developer_stage": "development_completed",
+    }
 
 
 def initialize_developer_state(state: CodeCrewState) -> dict:
@@ -261,7 +187,7 @@ def initialize_developer_state(state: CodeCrewState) -> dict:
         ),
         "applied_files": state.get("applied_files", []),
         "stage_summary": [],
-        "developer_stage": "backend"
+        "developer_stage": "development",
     }
 
 
@@ -288,16 +214,12 @@ def finalize_development_node(state: CodeCrewState) -> dict:
 graph = StateGraph(CodeCrewState)
 
 graph.add_node("initialize", initialize_developer_state)
-graph.add_node("backend", backend_stage_node)
-graph.add_node("database", database_stage_node)
-graph.add_node("frontend", frontend_stage_node)
+graph.add_node("develop", develop_node)
 graph.add_node("finalize", finalize_development_node)
 
 graph.add_edge(START, "initialize")
-graph.add_edge("initialize", "backend")
-graph.add_edge("backend", "database")
-graph.add_edge("database", "frontend")
-graph.add_edge("frontend", "finalize")
+graph.add_edge("initialize", "develop")
+graph.add_edge("develop", "finalize")
 graph.add_edge("finalize", END)
 
 developer_subgraph = graph.compile()

@@ -1,6 +1,4 @@
-
-import operator
-from typing import Annotated, TypedDict
+from typing import TypedDict
 
 
 class CodeCrewState(TypedDict, total=False):
@@ -11,6 +9,8 @@ class CodeCrewState(TypedDict, total=False):
     workspace: str
     repo_tree: str
     file_contents: str
+    # Detected projects (see sandbox/stack.py): languages, frameworks, ...
+    stack: dict
 
     # Planning information
     intake_result: dict
@@ -18,6 +18,9 @@ class CodeCrewState(TypedDict, total=False):
     architecture: dict
     tasks: list[dict]
     execution_batches: list[list[str]]
+    # Contract shared by every developer (see agents/architect.py)
+    api_contract: list[str]
+    data_model: list[str]
 
     # Developer information
     implementation_summary: str
@@ -28,10 +31,6 @@ class CodeCrewState(TypedDict, total=False):
     working_repo_tree: str
     working_file_contents: str
     stage_summary: list[str]
-
-    # Parallel developer agents can append their patches
-    developer_errors: Annotated[list[dict], operator.add]
-    patches: Annotated[list[dict], operator.add]
 
     # Testing information
     execution_result: dict
@@ -48,13 +47,14 @@ class CodeCrewState(TypedDict, total=False):
     status: str
     last_error: str
 
-    # Human approval and publishing
-        # Human approval and publishing
+    # Human approval
     approval_status: str
     approval_feedback: str
     approval_request: dict
     revision_feedback: str
-    pr_url: str
 
-    # Usage tracking
-    cost_usd: float
+    # Publishing (see services/publisher.py)
+    publish_status: str
+    publish_error: str
+    branch_name: str
+    pr_url: str

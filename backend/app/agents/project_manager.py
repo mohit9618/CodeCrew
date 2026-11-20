@@ -2,7 +2,6 @@
 import json
 
 from pydantic import BaseModel, Field
-from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from backend.app.llm import get_groq_llm
 
@@ -25,7 +24,7 @@ class ProjectSpecification(BaseModel):
 
 class ProjectManagerAgent:
     def __init__(self):
-        self.llm = get_groq_llm(max_tokens=2500)
+        self.llm = get_groq_llm(max_tokens=2500, role="project_manager")
 
     async def create_specification(
         self,

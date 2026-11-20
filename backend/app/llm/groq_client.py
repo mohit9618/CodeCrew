@@ -1,17 +1,54 @@
+"""Groq chat client with rate limiting, retries and per-role model choice.
+
+Groq's free tier limits tokens per minute (TPM) *per model*, so every model
+gets its own limiter. Which model an agent uses is configurable per role:
+
+    GROQ_MODEL                 default model for every role
+    GROQ_MODEL_<ROLE>          override for one role, e.g. GROQ_MODEL_ARCHITECT
+    GROQ_TPM_LIMIT             override the TPM budget for every model
+    GROQ_TPM_SAFETY_MARGIN     tokens kept free below the limit (default 1000)
+    GROQ_TPD_LIMIT             optional daily token warning threshold
+    GROQ_MAX_RETRIES           retries for 429s and connection errors
+    GROQ_MAX_RETRY_WAIT        longest retry-after (seconds) worth waiting for
+
+Roles: intake, project_manager, architect, backend_developer,
+database_developer, frontend_developer, tester, reviewer, analyzer.
+"""
 import asyncio
 import os
 import time
 from collections import deque
 
 from dotenv import load_dotenv
-from groq import RateLimitError
+from groq import APIConnectionError, RateLimitError
 from langchain_groq import ChatGroq
 from pydantic import PrivateAttr
 
 load_dotenv()
 
+# Default for every role. A non-reasoning model: reasoning models spend part
+# of max_tokens on hidden thinking, which truncates long JSON answers.
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
+
+# Free-tier tokens-per-minute per model (Groq rate-limits page). Models not
+# listed fall back to DEFAULT_TPM; set GROQ_TPM_LIMIT to override.
+MODEL_TPM = {
+    "llama-3.3-70b-versatile": 12_000,
+    "llama-3.1-8b-instant": 6_000,
+    "openai/gpt-oss-120b": 8_000,
+    "openai/gpt-oss-20b": 8_000,
+    "qwen/qwen3-32b": 6_000,
+    "moonshotai/kimi-k2-instruct": 10_000,
+    "meta-llama/llama-4-scout-17b-16e-instruct": 30_000,
+}
+DEFAULT_TPM = 6_000
+
+CHARS_PER_TOKEN = 4
+
 
 class GroqRateLimiter:
+    """Sliding one-minute token budget shared by all calls to one model."""
+
     def __init__(
         self,
         tpm_limit: int = 8000,
@@ -23,8 +60,7 @@ class GroqRateLimiter:
         self.requests = deque()
         self.lock = asyncio.Lock()
 
-        # Optional tokens-per-day tracking (Groq's free tier allows
-        # 200,000 for gpt-oss-120b). Estimates only; 0 disables it.
+        # Optional tokens-per-day tracking. Estimates only; 0 disables it.
         self.tpd_limit = tpd_limit
         self.daily_requests = deque()
         self._daily_warned = False
@@ -128,9 +164,23 @@ class SharedGroqClient(ChatGroq):
 
     def estimate_tokens(self, input_data) -> int:
         input_chars = len(str(input_data))
-        input_tokens = max(1, input_chars // 4)
+        input_tokens = max(1, input_chars // CHARS_PER_TOKEN)
 
         return input_tokens + self._reserved_output_tokens
+
+    def prompt_char_budget(self, overhead_tokens: int = 0) -> int:
+        """Characters of prompt that fit this model's per-minute budget.
+
+        `overhead_tokens` is for fixed text (system prompt) the caller
+        already knows it will send.
+        """
+        tokens = (
+            self._rate_limiter.max_budget
+            - self._reserved_output_tokens
+            - overhead_tokens
+        )
+
+        return max(0, tokens * CHARS_PER_TOKEN)
 
     def get_retry_delay(self, error, attempt: int) -> float:
         response = getattr(error, "response", None)
@@ -185,22 +235,63 @@ class SharedGroqClient(ChatGroq):
 
                 await asyncio.sleep(wait_time)
 
+            except APIConnectionError as error:
+                # Covers DNS failures, dropped connections and timeouts
+                # (APITimeoutError is a subclass).
+                if attempt == self._max_retries:
+                    raise
 
-_tpm_limit = int(os.getenv("GROQ_TPM_LIMIT", "8000"))
-_safety_margin = int(os.getenv("GROQ_TPM_SAFETY_MARGIN", "1000"))
+                wait_time = self.get_retry_delay(error, attempt)
 
-_tpd_limit = int(os.getenv("GROQ_TPD_LIMIT", "200000"))
+                print(
+                    f"[Groq connection] Retrying in {wait_time:.1f}s "
+                    f"({attempt + 1}/{self._max_retries})"
+                )
 
-_shared_limiter = GroqRateLimiter(
-    tpm_limit=_tpm_limit,
-    safety_margin=_safety_margin,
-    tpd_limit=_tpd_limit
-)
-
-_shared_clients = {}
+                await asyncio.sleep(wait_time)
 
 
-def get_groq_llm(max_tokens: int | None = None):
+def resolve_model(role: str | None = None) -> str:
+    """Model for a role: GROQ_MODEL_<ROLE>, then GROQ_MODEL, then default."""
+    if role:
+        specific = os.getenv(f"GROQ_MODEL_{role.upper()}")
+
+        if specific:
+            return specific
+
+    return os.getenv("GROQ_MODEL") or DEFAULT_MODEL
+
+
+def tpm_for_model(model: str) -> int:
+    override = os.getenv("GROQ_TPM_LIMIT")
+
+    if override:
+        return int(override)
+
+    return MODEL_TPM.get(model, DEFAULT_TPM)
+
+
+_limiters: dict[str, GroqRateLimiter] = {}
+_shared_clients: dict[tuple[str, int], SharedGroqClient] = {}
+
+
+def get_limiter(model: str) -> GroqRateLimiter:
+    """One limiter per model, because Groq limits each model separately."""
+    if model not in _limiters:
+        _limiters[model] = GroqRateLimiter(
+            tpm_limit=tpm_for_model(model),
+            safety_margin=int(os.getenv("GROQ_TPM_SAFETY_MARGIN", "1000")),
+            tpd_limit=int(os.getenv("GROQ_TPD_LIMIT", "0"))
+        )
+
+    return _limiters[model]
+
+
+def get_groq_llm(
+    max_tokens: int | None = None,
+    role: str | None = None,
+    model: str | None = None
+) -> SharedGroqClient:
     if max_tokens is None:
         max_tokens = int(os.getenv("GROQ_MAX_TOKENS", "1200"))
 
@@ -209,12 +300,21 @@ def get_groq_llm(max_tokens: int | None = None):
     if max_tokens <= 0:
         raise ValueError("max_tokens must be greater than zero.")
 
-    if max_tokens not in _shared_clients:
-        _shared_clients[max_tokens] = SharedGroqClient(
-            limiter=_shared_limiter,
-            model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+    model = model or resolve_model(role)
+
+    # Never reserve more than half of the model's per-minute budget for the
+    # answer: on a small-limit model a large output reservation would leave
+    # no room for the prompt (and the rate limiter would reject it).
+    max_tokens = min(max_tokens, max(256, get_limiter(model).max_budget // 2))
+
+    key = (model, max_tokens)
+
+    if key not in _shared_clients:
+        _shared_clients[key] = SharedGroqClient(
+            limiter=get_limiter(model),
+            model=model,
             temperature=0,
             max_tokens=max_tokens
         )
 
-    return _shared_clients[max_tokens]
+    return _shared_clients[key]

@@ -1,14 +1,14 @@
 import asyncio
 
 from backend.app.agents import developer as developer_module
+import pytest
+
 from backend.app.agents.developer import (
-    MAX_FILE_CONTENT_CHARS,
-    MAX_TASK_CHARS,
-    MAX_TREE_CHARS,
+    MAX_OUTPUT_TOKENS,
     DeveloperAgent,
     DeveloperOutput,
 )
-from backend.app.llm.groq_client import GroqRateLimiter
+from backend.app.llm.groq_client import GroqRateLimiter, SharedGroqClient
 from backend.app.utils.repo_tree import build_repo_tree
 
 
@@ -58,28 +58,37 @@ class _FakeStructuredLLM:
         return DeveloperOutput(summary="ok", changes=[])
 
 
-def test_developer_prompt_fits_default_tpm_budget():
+@pytest.mark.parametrize("tpm_limit", [6_000, 8_000, 12_000])
+def test_developer_prompt_fits_the_models_tpm_budget(tpm_limit):
+    """Whatever the model's limit, the prompt must stay under it.
+
+    Prompt size is derived from the model's budget, so a small model gets a
+    smaller prompt instead of a ValueError from the rate limiter.
+    """
+    limiter = GroqRateLimiter(tpm_limit=tpm_limit, safety_margin=1000)
+    client = SharedGroqClient(
+        limiter=limiter,
+        model="test-model",
+        api_key="test-key",
+        max_tokens=MAX_OUTPUT_TOKENS
+    )
+
     agent = DeveloperAgent.__new__(DeveloperAgent)
     agent.specialization = "backend"
+    agent.llm = client
     agent.structured_llm = _FakeStructuredLLM()
 
     asyncio.run(
         agent.generate_changes(
             task="t" * 50_000,
             repo_tree="r" * 50_000,
-            file_contents="f" * 50_000
+            file_contents="f" * 50_000,
+            observations="o" * 50_000
         )
     )
 
-    human = agent.structured_llm.messages[1][1]
-
-    assert len(human) < (
-        MAX_TASK_CHARS + MAX_TREE_CHARS + MAX_FILE_CONTENT_CHARS + 1_000
-    )
-
-    # Same estimate SharedGroqClient uses: chars // 4 + reserved output.
-    estimate = len(str(agent.structured_llm.messages)) // 4 + 2_500
-    limiter = GroqRateLimiter(tpm_limit=8000, safety_margin=1000)
+    # Same estimate SharedGroqClient uses for the rate limiter.
+    estimate = client.estimate_tokens(agent.structured_llm.messages)
 
     assert estimate <= limiter.max_budget
 

@@ -1,15 +1,18 @@
-
 import asyncio
+import os
 
 from backend.app.agents.intake import IntakeAgent
 from backend.app.agents.project_manager import ProjectManagerAgent
 from backend.app.agents.architect import ArchitectAgent
-from backend.app.agents.developer import DeveloperAgent
 from backend.app.agents.tester import TesterAgent
 from backend.app.agents.reviewer import ReviewerAgent
-
-from backend.app.mcp.clients.filesystem import FilesystemClient
-from sandbox.execution import run_tests
+from backend.app.services.publisher import (
+    PublishError,
+    build_branch_name,
+    build_pull_request_body,
+    publish_changes,
+)
+from sandbox.execution import run_checks
 
 
 async def intake_node(state: dict) -> dict:
@@ -61,125 +64,90 @@ async def architect_node(state: dict) -> dict:
         "architecture": architecture,
         "tasks": architecture["tasks"],
         "execution_batches": architecture["execution_batches"],
+        "api_contract": architecture.get("api_contract", []),
+        "data_model": architecture.get("data_model", []),
         "status": "architecture_completed"
     }
 
 
 
-async def developer_node(state: dict) -> dict:
-    developer = DeveloperAgent()
-
-    attempt = state.get("retry_count", 0) + 1
-    task = state["request"]
-
-    if state.get("last_error"):
-        task += f"""
-
-        PREVIOUS TEST FAILURE:
-        {state['last_error']}
-
-        Fix the implementation based on the failure.
-        Preserve existing functionality and tests.
-        """
-
-    output = await developer.generate_changes(
-        task=task,
-        repo_tree=state["repo_tree"],
-        file_contents=state["file_contents"]
-    )
-
-    if output.questions:
-        return {
-            "retry_count": attempt,
-            "status": "needs_clarification",
-            "last_error": "\n".join(output.questions)
-        }
-
-    if not output.changes:
-        return {
-            "retry_count": attempt,
-            "status": "no_changes",
-            "last_error": "Developer generated no changes."
-        }
-
-    filesystem = FilesystemClient(
-        workspace=state["workspace"]
-    )
-
-    await filesystem.connect()
-
-    try:
-        applied_files = await developer.apply_changes(
-            output,
-            filesystem
-        )
-    finally:
-        await filesystem.disconnect()
-
-    return {
-        "retry_count": attempt,
-        "implementation_summary": output.summary,
-        "applied_files": applied_files,
-        "status": "testing"
-    }
-
-
 async def tester_node(state: dict) -> dict:
-    tester = TesterAgent()
-
     execution = await asyncio.to_thread(
-        run_tests,
-        state["workspace"]
+        run_checks,
+        state["workspace"],
+        state.get("applied_files", [])
     )
 
-    test_output = (
-        execution["stdout"] + "\n" + execution["stderr"]
-    )
-
-    analysis = await tester.analyze_results(
-        task=state["request"],
-        implementation_summary=state["implementation_summary"],
-        test_output=test_output,
-        exit_code=execution["exit_code"]
-    )
-
-    # pytest's exit code is the source of truth. The LLM analysis is only
-    # a summary: if it fails to parse or is cut short it reports
-    # "needs_attention", and requiring "passed" from it made a green test
-    # run count as a failure and sent the workflow around the retry loop.
-    passed = (
-        execution["exit_code"] == 0
-        and not execution["timed_out"]
-        and analysis.failed_count == 0
-    )
+    # The sandbox result is the source of truth. The LLM analysis below is
+    # only a readable summary: if it fails to parse or is cut short it must
+    # not turn a green run into a failure and restart the retry loop.
+    passed = execution["passed"]
 
     print(
-        f"\n[Tester] exit_code={execution['exit_code']} "
-        f"timed_out={execution['timed_out']} "
-        f"-> {'PASSED' if passed else 'FAILED'}"
+        f"\n[Tester] {'PASSED' if passed else 'FAILED'} "
+        f"(exit_code={execution['exit_code']}, "
+        f"timed_out={execution['timed_out']})"
     )
 
-    if not passed:
-        print("[Tester] last lines of test output:")
-        print("\n".join(test_output.strip().splitlines()[-15:]))
+    for check in execution["checks"]:
+        status = (
+            "ok" if check["ok"]
+            else "FAILED" if check["blocking"]
+            else "warning"
+        )
+        print(f"  [{check['project']}] {check['name']}: {status}")
+
+    if execution["no_checks"]:
+        # Nothing was run, so there is nothing for the LLM to analyse.
+        test_report = {
+            "overall_status": "needs_attention",
+            "passed_count": 0,
+            "failed_count": 0,
+            "skipped_count": 0,
+            "results": [],
+            "analysis": execution["stdout"],
+            "issues": [],
+        }
+        issues = []
+    else:
+        tester = TesterAgent()
+
+        analysis = await tester.analyze_results(
+            task=state["request"],
+            implementation_summary=state["implementation_summary"],
+            test_output=execution["stdout"],
+            exit_code=execution["exit_code"]
+        )
+
+        test_report = analysis.model_dump()
+        issues = analysis.issues
 
     last_error = ""
 
     if not passed:
-        last_error = f"""
-        EXIT CODE: {execution['exit_code']}
-        TIMED OUT: {execution['timed_out']}
+        failed_output = "\n\n".join(
+            f"[{check['project']}] {check['name']}"
+            + (" (timed out)" if check["timed_out"] else "")
+            + f" exit {check['exit_code']}:\n{check['output'].strip()}"
+            for check in execution["checks"]
+            if check["blocking"] and not check["ok"]
+        )
 
-        TEST OUTPUT:
-        {test_output}
+        issue_text = "\n".join(f"- {issue}" for issue in issues)
 
-        TESTER ANALYSIS:
-        {analysis.model_dump_json(indent=2)}
-        """
+        # The failing output goes last: only its tail reaches the
+        # developers' prompt.
+        last_error = (
+            (f"TESTER NOTES:\n{issue_text}\n\n" if issue_text else "")
+            + f"FAILED CHECKS:\n{failed_output}"
+        )
 
     return {
-        "execution_result": execution,
-        "test_report": analysis.model_dump(),
+        "execution_result": {
+            key: execution[key]
+            for key in ("passed", "exit_code", "timed_out", "stack", "checks")
+        },
+        "test_report": test_report,
         "status": "passed" if passed else "failed",
         "last_error": last_error
     }
@@ -206,4 +174,64 @@ async def reviewer_node(state: dict) -> dict:
     return {
         "review_report": review_report,
         "review_status": result.overall_status
+    }
+
+
+async def publisher_node(state: dict) -> dict:
+    """After approval: commit, push and open a pull request.
+
+    Never raises. If publishing is not possible the changes stay in the
+    workspace and the reason is recorded in the state.
+    """
+    token = os.getenv("GITHUB_TOKEN", "")
+
+    if not token:
+        return {
+            "status": "approved",
+            "publish_status": "skipped",
+            "publish_error": (
+                "GITHUB_TOKEN is not set, so no pull request was opened. "
+                "The changes remain in the run's workspace."
+            ),
+        }
+
+    request = state.get("request", "")
+    title = f"CodeCrew: {' '.join(request.split())[:70]}"
+    branch = build_branch_name(request, state["workspace"])
+
+    try:
+        result = await asyncio.to_thread(
+            publish_changes,
+            state["workspace"],
+            state.get("applied_files", []),
+            title,
+            build_pull_request_body(state),
+            branch,
+            token,
+        )
+
+    except PublishError as error:
+        return {
+            "status": "approved",
+            "publish_status": "failed",
+            "publish_error": str(error),
+            "branch_name": branch,
+        }
+
+    except Exception as error:
+        return {
+            "status": "approved",
+            "publish_status": "failed",
+            "publish_error": f"{type(error).__name__}: {error}",
+            "branch_name": branch,
+        }
+
+    print(f"[Publisher] Pull request opened: {result['pr_url']}")
+
+    return {
+        "status": "published",
+        "publish_status": "published",
+        "publish_error": "",
+        "branch_name": result["branch"],
+        "pr_url": result["pr_url"],
     }

@@ -37,7 +37,7 @@ class TesterOutput(BaseModel):
 class TesterAgent:
 
     def __init__(self):
-        self.llm = get_groq_llm()
+        self.llm = get_groq_llm(role="tester")
 
     def extract_json(self, content: str) -> dict:
         content = content.strip()

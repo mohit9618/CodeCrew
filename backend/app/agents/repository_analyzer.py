@@ -4,32 +4,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 from backend.app.llm import get_groq_llm
+from backend.app.utils.ignore import (  # noqa: F401  (re-exported)
+    IGNORED_DIRS,
+    IGNORED_FILES,
+    IGNORED_SUFFIXES,
+)
 from pydantic import BaseModel, Field , model_validator
-from langchain_groq import ChatGroq
 
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
-
-IGNORED_DIRS = {
-    ".git", ".venv", "venv", "env", "node_modules",
-    "__pycache__", ".next", "dist", "build", "coverage",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".idea"
-}
-
-IGNORED_FILES = {
-    ".npmrc", ".pypirc", ".netrc", "id_rsa",
-    "id_ed25519", "credentials", "secrets.json",
-    "service-account.json", "package-lock.json",
-    "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "uv.lock"
-}
-
-IGNORED_SUFFIXES = {
-    ".pem", ".key", ".p12", ".pfx", ".crt", ".cer",
-    ".der", ".pyc", ".db", ".sqlite", ".zip", ".exe",
-    ".dll", ".png", ".jpg", ".jpeg", ".gif", ".pdf",
-    ".mp4", ".mp3"
-}
 
 IMPORTANT_FILES = {
     "readme.md", "package.json", "pyproject.toml",
@@ -149,7 +133,7 @@ class RepositoryAnalysis(BaseModel):
 class RepositoryAnalyzerAgent:
 
     def __init__(self):
-        self.llm = get_groq_llm()
+        self.llm = get_groq_llm(role="analyzer")
 
         self.structured_llm = self.llm.with_structured_output(
             RepositoryAnalysis,

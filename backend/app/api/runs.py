@@ -1,4 +1,5 @@
 
+import asyncio
 import traceback
 
 from uuid import uuid4
@@ -22,6 +23,8 @@ from backend.app.repository.repository_service import (
 from backend.app.agents.repository_analyzer import (
     RepositoryAnalyzerAgent
 )
+
+from sandbox.stack import detect_stack
 
 
 router = APIRouter(prefix="/runs", tags=["Runs"])
@@ -60,6 +63,10 @@ async def create_run(
 
         print("\n[3] Initializing workflow state...", flush=True)
 
+        stack = await asyncio.to_thread(detect_stack, workspace)
+
+        print(f"Detected stack:\n{stack['summary']}", flush=True)
+
         initial_state = {
             "request": data.request,
             "repo_url": str(data.repo_url),
@@ -67,6 +74,7 @@ async def create_run(
             "repo_tree": analysis["repo_tree"],
             "file_contents": analysis["file_contents"],
             "repository_analysis": analysis["repository_analysis"],
+            "stack": stack,
             "retry_count": 0,
             "max_attempts": 3,
             "revision_count": 0,

@@ -117,12 +117,11 @@ class FakeTester:
         return self.analysis
 
 
-def analysis(status, failed=0):
+def analysis(status, issues=()):
     return SimpleNamespace(
         overall_status=status,
-        failed_count=failed,
+        issues=list(issues),
         model_dump=lambda: {"overall_status": status},
-        model_dump_json=lambda indent=2: "{}"
     )
 
 
@@ -134,41 +133,152 @@ def make_tester_state():
     }
 
 
+def execution_result(passed, timed_out=False, output="", no_checks=False):
+    checks = [] if no_checks else [{
+        "project": ".",
+        "name": "tests",
+        "blocking": True,
+        "ok": passed,
+        "exit_code": 0 if passed else 1,
+        "timed_out": timed_out,
+        "output": output,
+    }]
+
+    return {
+        "passed": passed,
+        "exit_code": 0 if passed else 1,
+        "timed_out": timed_out,
+        "stdout": output,
+        "stderr": "",
+        "checks": checks,
+        "no_checks": no_checks,
+        "stack": "- .: python - flask",
+    }
+
+
 @pytest.mark.parametrize(
-    "exit_code, timed_out, tester_status, failed_count, expected",
+    "passed, timed_out, tester_status, expected",
     [
-        # Green pytest run must pass even if the LLM summary fell back to
-        # needs_attention (parse error / oversized prompt).
-        (0, False, "needs_attention", 0, "passed"),
-        (0, False, "passed", 0, "passed"),
-        (1, False, "passed", 0, "failed"),
-        (0, True, "passed", 0, "failed"),
-        (0, False, "passed", 2, "failed"),
+        # A green sandbox run must pass even if the LLM summary fell back
+        # to needs_attention (parse error / oversized prompt).
+        (True, False, "needs_attention", "passed"),
+        (True, False, "passed", "passed"),
+        (False, False, "passed", "failed"),
+        (False, True, "passed", "failed"),
     ]
 )
-async def test_tester_node_trusts_pytest_exit_code(
-    monkeypatch, exit_code, timed_out, tester_status, failed_count, expected
+async def test_tester_node_trusts_the_sandbox_result(
+    monkeypatch, passed, timed_out, tester_status, expected
 ):
     monkeypatch.setattr(
         nodes,
-        "run_tests",
-        lambda workspace: {
-            "exit_code": exit_code,
-            "stdout": "out",
-            "stderr": "",
-            "timed_out": timed_out
-        }
+        "run_checks",
+        lambda workspace, files: execution_result(
+            passed, timed_out, output="FAILED test_x - assert 1 == 2"
+        )
     )
     monkeypatch.setattr(
-        nodes,
-        "TesterAgent",
-        lambda: FakeTester(analysis(tester_status, failed_count))
+        nodes, "TesterAgent", lambda: FakeTester(analysis(tester_status))
     )
 
     result = await nodes.tester_node(make_tester_state())
 
     assert result["status"] == expected
     assert bool(result["last_error"]) == (expected == "failed")
+
+
+async def test_failure_output_is_last_in_last_error(monkeypatch):
+    """Only the tail of last_error reaches the developer, so the failing
+    output must come after the tester's notes."""
+    monkeypatch.setattr(
+        nodes, "run_checks",
+        lambda workspace, files: execution_result(
+            False, output="FAILED test_x - assert 1 == 2"
+        )
+    )
+    monkeypatch.setattr(
+        nodes, "TesterAgent",
+        lambda: FakeTester(analysis("failed", issues=["Fix the import"]))
+    )
+
+    result = await nodes.tester_node(make_tester_state())
+
+    assert result["last_error"].index("Fix the import") < result[
+        "last_error"
+    ].index("FAILED test_x")
+
+
+async def test_tester_node_skips_the_llm_when_nothing_was_run(monkeypatch):
+    monkeypatch.setattr(
+        nodes, "run_checks",
+        lambda workspace, files: execution_result(
+            True, output="No runnable project", no_checks=True
+        )
+    )
+
+    def must_not_be_created():
+        raise AssertionError("no LLM call is needed when nothing ran")
+
+    monkeypatch.setattr(nodes, "TesterAgent", must_not_be_created)
+
+    result = await nodes.tester_node(make_tester_state())
+
+    assert result["status"] == "passed"
+    assert result["test_report"]["overall_status"] == "needs_attention"
+    assert "No runnable project" in result["test_report"]["analysis"]
+
+
+# ------------------------------------------------------------- publisher
+
+async def test_publisher_is_skipped_without_a_token(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    result = await nodes.publisher_node({"request": "x", "workspace": "w"})
+
+    assert result["publish_status"] == "skipped"
+    assert "GITHUB_TOKEN" in result["publish_error"]
+    assert result["status"] == "approved"
+
+
+async def test_publisher_records_the_pull_request(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    seen = {}
+
+    def fake_publish(workspace, files, title, body, branch, token):
+        seen.update(files=files, branch=branch, token=token, title=title)
+        return {"branch": branch, "pr_url": "https://github.com/o/r/pull/1"}
+
+    monkeypatch.setattr(nodes, "publish_changes", fake_publish)
+
+    result = await nodes.publisher_node({
+        "request": "Add a health endpoint",
+        "workspace": "/ws/abcd1234-0000",
+        "applied_files": ["app/health.py"],
+    })
+
+    assert result["status"] == "published"
+    assert result["pr_url"] == "https://github.com/o/r/pull/1"
+    assert seen["files"] == ["app/health.py"]
+    assert seen["branch"].startswith("codecrew/add-a-health-endpoint-")
+
+
+@pytest.mark.parametrize("error", [
+    nodes.PublishError("push refused"),
+    RuntimeError("boom"),
+])
+async def test_publisher_never_raises_into_the_workflow(monkeypatch, error):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+
+    def failing(*args):
+        raise error
+
+    monkeypatch.setattr(nodes, "publish_changes", failing)
+
+    result = await nodes.publisher_node({"request": "x", "workspace": "/ws/a"})
+
+    assert result["publish_status"] == "failed"
+    assert str(error) in result["publish_error"]
+    assert result["status"] == "approved"
 
 
 # -------------------------------------------------------------- approval

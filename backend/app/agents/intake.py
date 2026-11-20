@@ -3,7 +3,6 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
-from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from backend.app.llm import get_groq_llm
 
@@ -27,7 +26,7 @@ class IntakeOutput(BaseModel):
 
 class IntakeAgent:
     def __init__(self):
-        self.llm = get_groq_llm()
+        self.llm = get_groq_llm(role="intake")
 
         self.max_attempts = 3
 
